@@ -9,7 +9,8 @@ import bitstamp as trading
 
 from os import path
 from telegram import Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, MessageHandler
+from telegram.ext.filters import Filters
 from telegram.error import Unauthorized, TimedOut
 from datetime import datetime, timedelta
 
