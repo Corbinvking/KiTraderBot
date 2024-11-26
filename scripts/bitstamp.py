@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import os, re
-from account import Account
+from scripts.account import Account
 from json import loads as json
 from requests import get
 from pathlib import Path

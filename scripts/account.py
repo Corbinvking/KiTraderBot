@@ -2,7 +2,7 @@
 
 import pytz
 import json
-import bitstamp as trading
+import scripts.bitstamp as trading
 from datetime import datetime
 
 DECIMALS = 7

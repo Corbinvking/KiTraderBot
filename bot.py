@@ -30,9 +30,9 @@ from telegram.ext.filters import Filters
 from telegram.error import Unauthorized, TimedOut
 
 # Local imports
-import gmail as alerts
-import bitstamp as trading
-from user_management import UserManager, UserRole
+import scripts.gmail as alerts
+import scripts.bitstamp as trading
+from scripts.user_management import UserManager, UserPermission
 
 #------------------------------------------------------------------------------
 # CONFIGURATION AND INITIALIZATION
@@ -62,7 +62,9 @@ user_manager = UserManager()
 
 def debug(update, answer):
     """Log debug information about user interactions."""
-    print(f"{datetime.now()} - {update.message.from_user.username} ({update.message.chat_id}): {update.message.text}\n{answer}\n")
+    user = update.message.from_user
+    print(f"DEBUG - User Info: username={user.username}, id={user.id}, first_name={user.first_name}")
+    print(f"{datetime.now()} - {user.username} ({update.message.chat_id}): {update.message.text}\n{answer}\n")
 
 def reply(update, text):
     """Send a reply to the user and log it."""
@@ -71,17 +73,19 @@ def reply(update, text):
 
 def is_superuser(update):
     """Check if the user is a superuser."""
-    return update.message.from_user.username in SUPERUSERS
+    return str(update.message.from_user.id) in SUPERUSERS
 
 #------------------------------------------------------------------------------
 # DECORATORS
 #------------------------------------------------------------------------------
 
-def restricted(handler, required_role=UserRole.BASIC):
+def restricted(handler, required_role=UserPermission.BASIC):
     """Restrict command access based on user role."""
     def response(update, context, **kwargs):
-        username = update.message.from_user.username
-        if user_manager.is_authorized(username, required_role):
+        user_id = str(update.message.from_user.id)
+        print(f"DEBUG - Access Check: user_id={user_id}")
+        print(f"DEBUG - Current users: {user_manager.users}")
+        if user_manager.is_authorized(user_id, required_role):
             handler(update, context, **kwargs)
         else:
             reply(update, "You don't have permission to use this command.")
@@ -216,6 +220,7 @@ def force_update(update, context):
 def start(update, context):
     """Handle the /start command - show available commands."""
     user = update.message.from_user
+    print(f"Debug - Username: {user.username}, ID: {user.id}")
     superuser = is_superuser(update)
     text = f"Hi, {user.first_name}! I'm {NAME}, your trading assistant!\n\nAvailable commands:"
     
@@ -253,7 +258,7 @@ def add_user(update, context):
     
     try:
         username = context.args[0]
-        role = UserRole(context.args[1].lower())
+        role = UserPermission(context.args[1].lower())
         user_manager.add_user(username, role)
         reply(update, f"User {username} added with role {role.value}")
     except ValueError:
@@ -313,9 +318,9 @@ dispatcher.add_error_handler(error_callback)
 #------------------------------------------------------------------------------
 
 # User Management Handlers
-dispatcher.add_handler(CommandHandler('adduser', restricted(add_user, required_role=UserRole.ADMIN)))
-dispatcher.add_handler(CommandHandler('removeuser', restricted(remove_user, required_role=UserRole.ADMIN)))
-dispatcher.add_handler(CommandHandler('users', restricted(list_users, required_role=UserRole.ADMIN)))
+dispatcher.add_handler(CommandHandler('adduser', restricted(add_user, required_role=UserPermission.ADMIN)))
+dispatcher.add_handler(CommandHandler('removeuser', restricted(remove_user, required_role=UserPermission.ADMIN)))
+dispatcher.add_handler(CommandHandler('users', restricted(list_users, required_role=UserPermission.ADMIN)))
 
 # Subscription Handlers
 dispatcher.add_handler(CommandHandler('subscribe', restricted(subscribe), pass_job_queue=True))
