@@ -32,7 +32,7 @@ from telegram.error import Unauthorized, TimedOut
 # Local imports
 import scripts.gmail as alerts
 import scripts.bitstamp as trading
-from scripts.user_management import UserManager, UserPermission
+from scripts.user_management import UserManager, UserRole
 
 #------------------------------------------------------------------------------
 # CONFIGURATION AND INITIALIZATION
@@ -56,6 +56,10 @@ except FileNotFoundError:
 # Initialize user manager
 user_manager = UserManager()
 
+# Initialize bot and get name
+bot = Bot(TELEGRAM_API_TOKEN)
+NAME = bot.get_me().first_name
+
 #------------------------------------------------------------------------------
 # UTILITY FUNCTIONS
 #------------------------------------------------------------------------------
@@ -63,8 +67,8 @@ user_manager = UserManager()
 def debug(update, answer):
     """Log debug information about user interactions."""
     user = update.message.from_user
-    print(f"DEBUG - User Info: username={user.username}, id={user.id}, first_name={user.first_name}")
-    print(f"{datetime.now()} - {user.username} ({update.message.chat_id}): {update.message.text}\n{answer}\n")
+    logging.info(f"DEBUG - User Info: username={user.username}, id={user.id}, first_name={user.first_name}")
+    logging.info(f"{datetime.now()} - {user.username} ({update.message.chat_id}): {update.message.text}\n{answer}\n")
 
 def reply(update, text):
     """Send a reply to the user and log it."""
@@ -79,12 +83,12 @@ def is_superuser(update):
 # DECORATORS
 #------------------------------------------------------------------------------
 
-def restricted(handler, required_role=UserPermission.BASIC):
+def restricted(handler, required_role=UserRole.BASIC):
     """Restrict command access based on user role."""
     def response(update, context, **kwargs):
         user_id = str(update.message.from_user.id)
-        print(f"DEBUG - Access Check: user_id={user_id}")
-        print(f"DEBUG - Current users: {user_manager.users}")
+        logging.info(f"DEBUG - Access Check: user_id={user_id}")
+        logging.info(f"DEBUG - Current users: {user_manager.users}")
         if user_manager.is_authorized(user_id, required_role):
             handler(update, context, **kwargs)
         else:
@@ -150,7 +154,7 @@ def subscription_update(bot, chat_id, force=False):
         if 'BUY' not in result and 'SELL' not in result:
             result = newAlertText + '\n' + result
         text = f"🚨 New Alert!\n\n{result}"
-        print(text)
+        logging.info(text)
         bot.send_message(chat_id=chat_id, text=text)
 
 def subscription_job(context):
@@ -159,7 +163,6 @@ def subscription_job(context):
 
 def loadSubscriptions():
     """Load saved subscriptions from file."""
-    global updater
     if path.isfile('subscriptions'):
         with open('subscriptions', 'r') as subscriptionsFile:
             subscriptionUsers = json.load(subscriptionsFile)
@@ -185,6 +188,45 @@ def __unsubscribe(update):
         SUBSCRIPTIONS.pop(user)
         return "Unsubscribed successfully."
     return "You are not subscribed."
+
+#------------------------------------------------------------------------------
+# COMMAND HANDLERS
+#------------------------------------------------------------------------------
+
+def start(update, context):
+    """Handle the /start command - show available commands."""
+    logger = logging.getLogger(__name__)
+    user = update.message.from_user
+    logger.info(f"Start command received from user {user.username} (ID: {user.id})")
+    
+    superuser = is_superuser(update)
+    logger.info(f"User {user.username} superuser status: {superuser}")
+    
+    text = f"Hi, {user.first_name}! I'm {NAME}, your trading assistant!\n\nAvailable commands:"
+    
+    # Basic commands
+    text += "\n/start - Shows this message"
+    text += "\n/ping - Test connection with trading API"
+    text += "\n/list - Show the available symbols"
+    text += "\n/price symbol - Current price for provided symbol"
+    
+    # Account commands
+    text += "\n/newAccount [balance] [currency] - Creates an account for mock trading"
+    text += "\n/deleteAccount - Deletes your trading account"
+    
+    if superuser:
+        logger.info(f"Adding superuser commands for {user.username}")
+        text += f"\n/account [{NAME}, {user.username}] - View your account or the bot account"
+        text += f"\n/history [{NAME}, {user.username}] - View your trades or the bot trades"
+        text += "\n/adduser telegram_id role - Add new user (roles: admin, premium, basic)"
+        text += "\n/removeuser telegram_id - Remove a user"
+        text += "\n/users - List all users and their roles"
+        text += f"\n/subscribe - Receive updates from the {NAME} auto-trading account"
+        text += f"\n/unsubscribe - Stop receiving updates"
+        text += f"\n/update - Force an update check"
+    
+    logger.info(f"Sending start message to user {user.username}")
+    reply(update, text)
 
 def subscribe(update, context):
     """Handle subscription requests."""
@@ -213,66 +255,29 @@ def force_update(update, context):
     if not newAlerts:
         reply(update, "Alerts are up to date.")
 
-#------------------------------------------------------------------------------
-# COMMAND HANDLERS
-#------------------------------------------------------------------------------
-
-def start(update, context):
-    """Handle the /start command - show available commands."""
-    user = update.message.from_user
-    print(f"Debug - Username: {user.username}, ID: {user.id}")
-    superuser = is_superuser(update)
-    text = f"Hi, {user.first_name}! I'm {NAME}, your trading assistant!\n\nAvailable commands:"
-    
-    # Basic commands
-    text += "\n/start - Shows this message"
-    text += "\n/ping - Test connection with trading API"
-    text += "\n/list - Show the available symbols"
-    text += "\n/price symbol - Current price for provided symbol"
-    
-    # Account commands
-    text += "\n/newAccount [balance] [currency] - Creates an account for mock trading"
-    text += "\n/deleteAccount - Deletes your trading account"
-    
-    if superuser:
-        text += f"\n/account [{NAME}, {user.username}] - View your account or the bot account"
-        text += f"\n/history [{NAME}, {user.username}] - View your trades or the bot trades"
-        text += "\n/adduser username role - Add new user (roles: admin, premium, basic)"
-        text += "\n/removeuser username - Remove a user"
-        text += "\n/users - List all users and their roles"
-        text += f"\n/subscribe - Receive updates from the {NAME} auto-trading account"
-        text += f"\n/unsubscribe - Stop receiving updates"
-        text += f"\n/update - Force an update check"
-    
-    reply(update, text)
-
-def unknown(update, context):
-    """Handle unknown commands."""
-    reply(update, f"Sorry, I didn't understand command {update.message.text}.")
-
 def add_user(update, context):
     """Add a new user to the bot with specified role."""
     if len(context.args) < 2:
-        reply(update, "Usage: /adduser username role\nRoles: admin, premium, basic")
+        reply(update, "Usage: /adduser telegram_id role\nRoles: admin, premium, basic")
         return
     
     try:
-        username = context.args[0]
-        role = UserPermission(context.args[1].lower())
-        user_manager.add_user(username, role)
-        reply(update, f"User {username} added with role {role.value}")
+        user_id = context.args[0]
+        role = UserRole(context.args[1].lower())
+        user_manager.add_user(user_id, role)
+        reply(update, f"User {user_id} added with role {role.value}")
     except ValueError:
         reply(update, "Invalid role. Use: admin, premium, or basic")
 
 def remove_user(update, context):
     """Remove a user from the bot."""
     if len(context.args) < 1:
-        reply(update, "Usage: /removeuser username")
+        reply(update, "Usage: /removeuser telegram_id")
         return
     
-    username = context.args[0]
-    user_manager.remove_user(username)
-    reply(update, f"User {username} has been removed")
+    user_id = context.args[0]
+    user_manager.remove_user(user_id)
+    reply(update, f"User {user_id} has been removed")
 
 def list_users(update, context):
     """List all users and their roles."""
@@ -282,88 +287,63 @@ def list_users(update, context):
         return
     
     text = "Registered Users:\n"
-    for username, data in users.items():
+    for user_id, data in users.items():
         status = "✅" if data["active"] else "❌"
-        text += f"\n{status} {username}: {data['role']}"
+        text += f"\n{status} {user_id}: {data['role']}"
     reply(update, text)
 
-#------------------------------------------------------------------------------
-# INITIALIZATION
-#------------------------------------------------------------------------------
-
-print("Starting bot...")
-
-bot = Bot(TELEGRAM_API_TOKEN)
-NAME = bot.get_me().first_name
-updater = Updater(TELEGRAM_API_TOKEN, use_context=True)
-dispatcher = updater.dispatcher
-
-# ERROR HANDLING
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.WARN)
-
-def error_callback(update, context):
-    try:
-        raise context.error
-    except Unauthorized:
-        __unsubscribe(update)
-    except TimedOut:
-        pass
-
-print('Adding command handlers...')
-
-dispatcher.add_error_handler(error_callback)
+def unknown(update, context):
+    """Handle unknown commands."""
+    reply(update, f"Sorry, I didn't understand command {update.message.text}.")
 
 #------------------------------------------------------------------------------
-# COMMAND HANDLERS REGISTRATION
+# MAIN FUNCTION
 #------------------------------------------------------------------------------
 
-# User Management Handlers
-dispatcher.add_handler(CommandHandler('adduser', restricted(add_user, required_role=UserPermission.ADMIN)))
-dispatcher.add_handler(CommandHandler('removeuser', restricted(remove_user, required_role=UserPermission.ADMIN)))
-dispatcher.add_handler(CommandHandler('users', restricted(list_users, required_role=UserPermission.ADMIN)))
+def main():
+    """Initialize and start the bot."""
+    print("Starting bot...")
+    logging.basicConfig(
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        level=logging.INFO
+    )
+    logger = logging.getLogger(__name__)
 
-# Subscription Handlers
-dispatcher.add_handler(CommandHandler('subscribe', restricted(subscribe), pass_job_queue=True))
-dispatcher.add_handler(CommandHandler('unsubscribe', restricted(unsubscribe)))
-dispatcher.add_handler(CommandHandler('update', restricted(force_update)))
+    updater = Updater(TELEGRAM_API_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
 
-# Trading Handlers
-dispatcher.add_handler(CommandHandler('ping', wrap(trading.ping)))
-dispatcher.add_handler(CommandHandler('price', send(trading.price, args=True)))
-dispatcher.add_handler(CommandHandler('list', send(trading.list_symbols)))
-dispatcher.add_handler(CommandHandler('account', account(trading.account)))
-dispatcher.add_handler(CommandHandler('history', account(trading.history)))
-dispatcher.add_handler(CommandHandler('trade', send(trading.trade, args=True)))
-dispatcher.add_handler(CommandHandler('tradeAll', send(trading.tradeAll, args=True)))
-dispatcher.add_handler(CommandHandler('newAccount', send(trading.newAccount, args=True)))
-dispatcher.add_handler(CommandHandler('deleteAccount', send(trading.deleteAccount)))
+    # Register command handlers
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("subscribe", restricted(subscribe, UserRole.ADMIN)))
+    dispatcher.add_handler(CommandHandler("unsubscribe", restricted(unsubscribe, UserRole.ADMIN)))
+    dispatcher.add_handler(CommandHandler("update", restricted(force_update, UserRole.ADMIN)))
+    dispatcher.add_handler(CommandHandler("adduser", restricted(add_user, UserRole.ADMIN)))
+    dispatcher.add_handler(CommandHandler("removeuser", restricted(remove_user, UserRole.ADMIN)))
+    dispatcher.add_handler(CommandHandler("users", restricted(list_users, UserRole.ADMIN)))
+    dispatcher.add_handler(CommandHandler("ping", wrap(trading.ping)))
+    dispatcher.add_handler(CommandHandler("price", send(trading.price, args=True)))
+    dispatcher.add_handler(CommandHandler("list", send(trading.list_symbols)))
+    dispatcher.add_handler(CommandHandler("account", account(trading.account)))
+    dispatcher.add_handler(CommandHandler("history", account(trading.history)))
+    dispatcher.add_handler(CommandHandler("trade", send(trading.trade, args=True)))
+    dispatcher.add_handler(CommandHandler("tradeAll", send(trading.tradeAll, args=True)))
+    dispatcher.add_handler(CommandHandler("newAccount", send(trading.newAccount, args=True)))
+    dispatcher.add_handler(CommandHandler("deleteAccount", send(trading.deleteAccount)))
+    
+    # Add handler for unknown commands
+    dispatcher.add_handler(MessageHandler(Filters.command, unknown))
 
-# Default Handlers
-dispatcher.add_handler(CommandHandler('start', start))
-dispatcher.add_handler(MessageHandler(Filters.command, unknown))
-dispatcher.add_handler(MessageHandler(Filters.text, start))
+    # Load saved subscriptions
+    loadSubscriptions()
 
-#------------------------------------------------------------------------------
-# START BOT
-#------------------------------------------------------------------------------
+    # Start the Bot
+    print(f"Bot {NAME} is running...")
+    updater.start_polling()
 
-print('Loading trading API...')
-trading.load()
+    # Run the bot until you send a signal to stop
+    updater.idle()
 
-print('Loading subscriptions...')
-loadSubscriptions()
-
-updater.start_polling()
-
-print(f"\n{NAME} Started!\n")
-
-updater.idle()
-
-# STOP
-print("Saving accounts...")
-trading.save()
-saveSubscriptions()
-
-print("Done! Goodbye!")
+if __name__ == '__main__':
+    main()
 
 
