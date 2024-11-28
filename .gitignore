@@ -6,3 +6,4 @@ accounts
 lastAlert
 subscriptions
 **.csv
+venv/
