@@ -1,0 +1,11 @@
+● kitraderbot.service - KiTraderBot Telegram Trading Bot
+     Loaded: loaded (]8;;file://ubuntu-s-1vcpu-2gb-70gb-intel-nyc1-01/etc/systemd/system/kitraderbot.service/etc/systemd/system/kitraderbot.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: activating (auto-restart) (Result: exit-code) since Thu 2024-11-28 08:35:57 UTC; 6s ago
+ Invocation: 6a5db6c7c0e742f3b4db524afbf9dbe5
+    Process: 56651 ExecStart=/opt/KiTraderBot/venv/bin/python3 -u /opt/KiTraderBot/bot.py [0;1;31m(code=exited, status=1/FAILURE)[0m
+   Main PID: 56651 (code=exited, status=1/FAILURE)
+   Mem peak: 41.2M
+        CPU: 1.415s
+
+Nov 28 08:35:57 ubuntu-s-1vcpu-2gb-70gb-intel-nyc1-01 systemd[1]: [0;1;38:5:185m[0;1;39m[0;1;38:5:185mkitraderbot.service: Failed with result 'exit-code'.[0m
+Nov 28 08:35:57 ubuntu-s-1vcpu-2gb-70gb-intel-nyc1-01 systemd[1]: kitraderbot.service: Consumed 1.415s CPU time, 41.2M memory peak.

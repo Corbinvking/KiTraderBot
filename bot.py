@@ -1,4 +1,4 @@
-#!/usr/bin/python3.6
+#!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
 """
@@ -7,343 +7,272 @@ KiTraderBot - Telegram Trading Bot
 
 This bot provides trading functionality through Telegram, supporting:
 - User management (admin, premium, basic users)
-- Trading operations (buy, sell, account management)
-- Auto-trading subscriptions
-- Price alerts and monitoring
+- Solana token tracking and trading
+- Simulated trading operations
+- Price monitoring and alerts
 """
 
-#------------------------------------------------------------------------------
-# IMPORTS
-#------------------------------------------------------------------------------
-
-# Standard library imports
-import pytz
+import os
+import sys
+import asyncio
 import logging
-import json
-from os import path
-from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters
+)
 
-# Third-party imports
-from telegram import Bot
-from telegram.ext import Updater, CommandHandler, MessageHandler
-from telegram.ext.filters import Filters
-from telegram.error import Unauthorized, TimedOut
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('/var/log/kitraderbot/bot.log'),
+        logging.FileHandler('/var/log/kitraderbot/error.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# Local imports
-import scripts.gmail as alerts
-import scripts.bitstamp as trading
+# Add project root to Python path
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 from scripts.user_management import UserManager, UserRole
+from scripts.solana import SolanaRPCManager, TokenTracker, TradingEngine
+from scripts.solana.bot_commands import TradingCommands
 
-#------------------------------------------------------------------------------
-# CONFIGURATION AND INITIALIZATION
-#------------------------------------------------------------------------------
-
-# Load Telegram token
-try:
-    with open("tokens/telegram", 'r') as telegram_token:
-        TELEGRAM_API_TOKEN = telegram_token.read().strip()
-except FileNotFoundError:
-    print("tokens/telegram not found!")
-    exit(1)
-
-# Load superusers
-try:
-    with open("superusers", 'r') as users:
-        SUPERUSERS = set(users.read().split('\n'))
-except FileNotFoundError:
-    SUPERUSERS = set()
-
-# Initialize user manager
-user_manager = UserManager()
-
-# Initialize bot and get name
-bot = Bot(TELEGRAM_API_TOKEN)
-NAME = bot.get_me().first_name
-
-#------------------------------------------------------------------------------
-# UTILITY FUNCTIONS
-#------------------------------------------------------------------------------
-
-def debug(update, answer):
-    """Log debug information about user interactions."""
-    user = update.message.from_user
-    logging.info(f"DEBUG - User Info: username={user.username}, id={user.id}, first_name={user.first_name}")
-    logging.info(f"{datetime.now()} - {user.username} ({update.message.chat_id}): {update.message.text}\n{answer}\n")
-
-def reply(update, text):
-    """Send a reply to the user and log it."""
-    debug(update, text)
-    update.message.reply_text(text)
-
-def is_superuser(update):
-    """Check if the user is a superuser."""
-    return str(update.message.from_user.id) in SUPERUSERS
-
-#------------------------------------------------------------------------------
-# DECORATORS
-#------------------------------------------------------------------------------
-
-def restricted(handler, required_role=UserRole.BASIC):
-    """Restrict command access based on user role."""
-    def response(update, context, **kwargs):
-        user_id = str(update.message.from_user.id)
-        logging.info(f"DEBUG - Access Check: user_id={user_id}")
-        logging.info(f"DEBUG - Current users: {user_manager.users}")
-        if user_manager.is_authorized(user_id, required_role):
-            handler(update, context, **kwargs)
-        else:
-            reply(update, "You don't have permission to use this command.")
-    return response
-
-def wrap(f):
-    """Wrap a function to handle Telegram updates."""
-    def response(update, context):
-        reply(update, f())
-    return response
-
-def send(f, args=False):
-    """Wrap a function to handle sending messages."""
-    if args:
-        def response(update, context):
-            reply(update, f(update.message.from_user.username, ' '.join(context.args)))
-    else:
-        def response(update, context):
-            reply(update, f(update.message.from_user.username))
-    return response
-
-def account(f):
-    """Wrap a function to handle account operations."""
-    def response(update, context):
-        reply(update, f(NAME, update.message.from_user.username, is_superuser(update), ' '.join(context.args)))
-    return response
-
-#------------------------------------------------------------------------------
-# SUBSCRIPTION MANAGEMENT
-#------------------------------------------------------------------------------
-
-SUBSCRIPTIONS = dict()  # users to job
-UPDATE_ALERTS_SECONDS = 900
-
-lastUpdate = alerts.get_last_alert_date() or datetime.now(pytz.UTC) - timedelta(hours=24)
-newAlerts = []
-updating = False
-
-def update_alerts(force=False):
-    """Update alerts from Gmail."""
-    global lastUpdate, newAlerts, updating
-    if updating or not alerts.ENABLED:
-        return
-    updating = True
-    now = datetime.now(pytz.UTC)
-    newAlerts = []
-    if force or lastUpdate < now - timedelta(seconds=UPDATE_ALERTS_SECONDS // 2):
+class TradingBot:
+    def __init__(self):
         try:
-            newAlerts = alerts.update_alerts()
-            lastUpdate = now
-        except Exception:
-            logging.exception("Cannot update alerts")
-    updating = False
+            # Load token
+            token_path = os.path.join(project_root, "tokens/telegram")
+            with open(token_path, 'r') as f:
+                self.token = f.read().strip()
+                
+            self.user_manager = UserManager()
+            self.rpc_manager = SolanaRPCManager()
+            self.token_tracker = None
+            self.trading_engine = None
+            self.trading_commands = None
+            self.db_pool = None
+            self.application = None
+            logger.info("Bot initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing bot: {e}")
+            raise
 
-def subscription_update(bot, chat_id, force=False):
-    """Process subscription updates."""
-    update_alerts(force)
-    for _, newAlertText in newAlerts:
-        if not trading.existsAccount(NAME):
-            trading.newAccount(NAME)
-        result = trading.tradeAll(NAME, newAlertText)
-        if 'BUY' not in result and 'SELL' not in result:
-            result = newAlertText + '\n' + result
-        text = f"🚨 New Alert!\n\n{result}"
-        logging.info(text)
-        bot.send_message(chat_id=chat_id, text=text)
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Send a message when the command /start is issued."""
+        try:
+            user = update.effective_user
+            # Initialize user in database
+            await self.user_manager.add_user(
+                user_id=user.id,
+                username=user.username or user.first_name,
+                role=UserRole.BASIC
+            )
+            
+            message = (
+                f"Hi {user.first_name}! Welcome to Solana Trading Bot!\n\n"
+                f"This bot allows you to:\n"
+                f"• Trade Solana tokens\n"
+                f"• Track positions\n"
+                f"• Monitor prices\n\n"
+                f"Use /help to see available commands."
+            )
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("💰 Open Wallet", callback_data='view_wallet'),
+                    InlineKeyboardButton("📈 Start Trading", callback_data='open_position')
+                ],
+                [
+                    InlineKeyboardButton("❓ Help", callback_data='show_help'),
+                    InlineKeyboardButton("⚙️ Settings", callback_data='show_settings')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                message,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            logger.info(f"Start command sent to user {user.id}")
+        except Exception as e:
+            logger.error(f"Error in start command: {e}", exc_info=True)
+            await update.message.reply_text(
+                "Welcome! Use /help to see available commands.\n\n"
+                "If you experience any issues, please try again."
+            )
 
-def subscription_job(context):
-    """Handle subscription job updates."""
-    subscription_update(context.bot, chat_id=context.job.context)
+    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Send a message when the command /help is issued."""
+        try:
+            help_text = (
+                "*Available Commands*\n\n"
+                "💰 *Wallet Commands:*\n"
+                "`/wallet` - Show your wallet balance and positions\n"
+                "`/positions` - List your open positions\n"
+                "`/positions closed` - List your closed positions\n\n"
+                "📈 *Trading Commands:*\n"
+                "`/open <token_address> <size_sol> <type>` - Open a new position\n"
+                "`/close <position_id>` - Close an existing position\n"
+                "`/price <token_address>` - Get current token price\n"
+                "`/info <token_address>` - Get token information\n\n"
+                "⚙️ *Settings:*\n"
+                "`/settings` - View your account settings"
+            )
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("💰 Wallet", callback_data='view_wallet'),
+                    InlineKeyboardButton("📊 Positions", callback_data='view_positions')
+                ],
+                [
+                    InlineKeyboardButton("📈 Trade", callback_data='open_position'),
+                    InlineKeyboardButton("⚙️ Settings", callback_data='show_settings')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                help_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            logger.info(f"Help command sent to user {update.effective_user.id}")
+        except Exception as e:
+            logger.error(f"Error in help command: {e}", exc_info=True)
+            await update.message.reply_text("Error displaying help message. Please try again.")
 
-def loadSubscriptions():
-    """Load saved subscriptions from file."""
-    if path.isfile('subscriptions'):
-        with open('subscriptions', 'r') as subscriptionsFile:
-            subscriptionUsers = json.load(subscriptionsFile)
-            for subscriber in subscriptionUsers:
-                job = updater.job_queue.run_repeating(subscription_job, 
-                    interval=UPDATE_ALERTS_SECONDS, 
-                    first=30, 
-                    context=subscriber['chat_id'])
-                SUBSCRIPTIONS[subscriber['user']] = job
+    async def unknown(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle unknown commands."""
+        try:
+            await update.message.reply_text(
+                f"Sorry, I didn't understand command: {update.message.text}\n"
+                f"Use /help to see available commands."
+            )
+            logger.info(f"Unknown command from user {update.effective_user.id}: {update.message.text}")
+        except Exception as e:
+            logger.error(f"Error handling unknown command: {e}")
 
-def saveSubscriptions():
-    """Save current subscriptions to file."""
-    with open('subscriptions', 'w') as subscriptionsFile:
-        json.dump([{ 'user': user, 'chat_id': job.context } 
-                  for user, job in SUBSCRIPTIONS.items()], 
-                 subscriptionsFile)
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle errors."""
+        logger.error(f"Exception while handling an update: {context.error}")
+        if update and isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "Sorry, an error occurred while processing your request. Please try again."
+            )
 
-def __unsubscribe(update):
-    """Internal function to handle unsubscription."""
-    user = update.message.from_user.username
-    if user in SUBSCRIPTIONS:
-        SUBSCRIPTIONS[user].schedule_removal()
-        SUBSCRIPTIONS.pop(user)
-        return "Unsubscribed successfully."
-    return "You are not subscribed."
+    async def initialize(self) -> None:
+        """Initialize bot components"""
+        try:
+            logger.info("Starting initialization...")
+            
+            # Initialize database
+            self.db_pool = await self.user_manager.init_db()
+            logger.info("Database initialized")
+            
+            # Initialize Solana components
+            self.token_tracker = TokenTracker(self.rpc_manager, self.db_pool)
+            self.trading_engine = TradingEngine(self.db_pool, self.token_tracker, self.user_manager)
+            self.trading_commands = TradingCommands(self.trading_engine, self.token_tracker)
+            logger.info("Solana components initialized")
+            
+            # Create the Application
+            self.application = Application.builder().token(self.token).build()
+            logger.info("Application created")
 
-#------------------------------------------------------------------------------
-# COMMAND HANDLERS
-#------------------------------------------------------------------------------
+            # Add handlers
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("help", self.help))
+            
+            # Setup trading commands
+            self.application.add_handler(CommandHandler("wallet", self.trading_commands.cmd_wallet))
+            self.application.add_handler(CommandHandler("open", self.trading_commands.cmd_open_position))
+            self.application.add_handler(CommandHandler("close", self.trading_commands.cmd_close_position))
+            self.application.add_handler(CommandHandler("positions", self.trading_commands.cmd_positions))
+            self.application.add_handler(CommandHandler("info", self.trading_commands.cmd_info))
+            self.application.add_handler(CommandHandler("price", self.trading_commands.cmd_price))
+            self.application.add_handler(CommandHandler("settings", self.trading_commands.cmd_settings))
+            
+            # Add callback query handler
+            self.application.add_handler(CallbackQueryHandler(self.trading_commands.callback_handler))
+            
+            # Unknown command handler
+            self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown))
+            
+            # Error handler
+            self.application.add_error_handler(self.error_handler)
+            
+            logger.info("Bot components initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize bot components: {e}")
+            raise
 
-def start(update, context):
-    """Handle the /start command - show available commands."""
-    logger = logging.getLogger(__name__)
-    user = update.message.from_user
-    logger.info(f"Start command received from user {user.username} (ID: {user.id})")
-    
-    superuser = is_superuser(update)
-    logger.info(f"User {user.username} superuser status: {superuser}")
-    
-    text = f"Hi, {user.first_name}! I'm {NAME}, your trading assistant!\n\nAvailable commands:"
-    
-    # Basic commands
-    text += "\n/start - Shows this message"
-    text += "\n/ping - Test connection with trading API"
-    text += "\n/list - Show the available symbols"
-    text += "\n/price symbol - Current price for provided symbol"
-    
-    # Account commands
-    text += "\n/newAccount [balance] [currency] - Creates an account for mock trading"
-    text += "\n/deleteAccount - Deletes your trading account"
-    
-    if superuser:
-        logger.info(f"Adding superuser commands for {user.username}")
-        text += f"\n/account [{NAME}, {user.username}] - View your account or the bot account"
-        text += f"\n/history [{NAME}, {user.username}] - View your trades or the bot trades"
-        text += "\n/adduser telegram_id role - Add new user (roles: admin, premium, basic)"
-        text += "\n/removeuser telegram_id - Remove a user"
-        text += "\n/users - List all users and their roles"
-        text += f"\n/subscribe - Receive updates from the {NAME} auto-trading account"
-        text += f"\n/unsubscribe - Stop receiving updates"
-        text += f"\n/update - Force an update check"
-    
-    logger.info(f"Sending start message to user {user.username}")
-    reply(update, text)
+    async def cleanup(self) -> None:
+        """Cleanup resources"""
+        logger.info("Starting cleanup...")
+        try:
+            if self.db_pool:
+                await self.db_pool.close()
+                logger.info("Database connection closed")
+            if self.application:
+                await self.application.stop()
+                await self.application.shutdown()
+                logger.info("Application stopped")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
 
-def subscribe(update, context):
-    """Handle subscription requests."""
-    user = update.message.from_user.username
-    if user not in SUBSCRIPTIONS:
-        job = context.job_queue.run_repeating(subscription_job, 
-            interval=UPDATE_ALERTS_SECONDS, 
-            first=0, 
-            context=update.message.chat_id)
-        SUBSCRIPTIONS[user] = job
-        reply(update, f"Now you are subscribed to {NAME} trades.")
-    else:
-        reply(update, "Already subscribed.")
+    def run(self) -> None:
+        """Run the bot."""
+        try:
+            # Initialize event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Initialize components
+            loop.run_until_complete(self.initialize())
+            
+            logger.info("Starting bot...")
+            
+            # Run the application
+            self.application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                close_loop=False
+            )
+            
+        except Exception as e:
+            logger.error(f"Error running bot: {e}", exc_info=True)
+            raise
+        finally:
+            try:
+                # Cleanup
+                if 'loop' in locals():
+                    loop.run_until_complete(self.cleanup())
+                    loop.close()
+                logger.info("Bot shutdown complete")
+            except Exception as e:
+                logger.error(f"Error during cleanup: {e}", exc_info=True)
 
-def unsubscribe(update, context):
-    """Handle unsubscription requests."""
-    reply(update, __unsubscribe(update))
-
-def force_update(update, context):
-    """Force an update check."""
-    if not alerts.ENABLED:
-        reply(update, "Alerts are disabled.")
-        return
-    reply(update, "Updating. Please, wait a few seconds.")
-    subscription_update(context.bot, update.message.chat_id, force=True)
-    if not newAlerts:
-        reply(update, "Alerts are up to date.")
-
-def add_user(update, context):
-    """Add a new user to the bot with specified role."""
-    if len(context.args) < 2:
-        reply(update, "Usage: /adduser telegram_id role\nRoles: admin, premium, basic")
-        return
-    
+def main() -> None:
+    """Start the bot."""
     try:
-        user_id = context.args[0]
-        role = UserRole(context.args[1].lower())
-        user_manager.add_user(user_id, role)
-        reply(update, f"User {user_id} added with role {role.value}")
-    except ValueError:
-        reply(update, "Invalid role. Use: admin, premium, or basic")
-
-def remove_user(update, context):
-    """Remove a user from the bot."""
-    if len(context.args) < 1:
-        reply(update, "Usage: /removeuser telegram_id")
-        return
-    
-    user_id = context.args[0]
-    user_manager.remove_user(user_id)
-    reply(update, f"User {user_id} has been removed")
-
-def list_users(update, context):
-    """List all users and their roles."""
-    users = user_manager.users
-    if not users:
-        reply(update, "No users registered")
-        return
-    
-    text = "Registered Users:\n"
-    for user_id, data in users.items():
-        status = "✅" if data["active"] else "❌"
-        text += f"\n{status} {user_id}: {data['role']}"
-    reply(update, text)
-
-def unknown(update, context):
-    """Handle unknown commands."""
-    reply(update, f"Sorry, I didn't understand command {update.message.text}.")
-
-#------------------------------------------------------------------------------
-# MAIN FUNCTION
-#------------------------------------------------------------------------------
-
-def main():
-    """Initialize and start the bot."""
-    print("Starting bot...")
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
-    )
-    logger = logging.getLogger(__name__)
-
-    updater = Updater(TELEGRAM_API_TOKEN, use_context=True)
-    dispatcher = updater.dispatcher
-
-    # Register command handlers
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("subscribe", restricted(subscribe, UserRole.ADMIN)))
-    dispatcher.add_handler(CommandHandler("unsubscribe", restricted(unsubscribe, UserRole.ADMIN)))
-    dispatcher.add_handler(CommandHandler("update", restricted(force_update, UserRole.ADMIN)))
-    dispatcher.add_handler(CommandHandler("adduser", restricted(add_user, UserRole.ADMIN)))
-    dispatcher.add_handler(CommandHandler("removeuser", restricted(remove_user, UserRole.ADMIN)))
-    dispatcher.add_handler(CommandHandler("users", restricted(list_users, UserRole.ADMIN)))
-    dispatcher.add_handler(CommandHandler("ping", wrap(trading.ping)))
-    dispatcher.add_handler(CommandHandler("price", send(trading.price, args=True)))
-    dispatcher.add_handler(CommandHandler("list", send(trading.list_symbols)))
-    dispatcher.add_handler(CommandHandler("account", account(trading.account)))
-    dispatcher.add_handler(CommandHandler("history", account(trading.history)))
-    dispatcher.add_handler(CommandHandler("trade", send(trading.trade, args=True)))
-    dispatcher.add_handler(CommandHandler("tradeAll", send(trading.tradeAll, args=True)))
-    dispatcher.add_handler(CommandHandler("newAccount", send(trading.newAccount, args=True)))
-    dispatcher.add_handler(CommandHandler("deleteAccount", send(trading.deleteAccount)))
-    
-    # Add handler for unknown commands
-    dispatcher.add_handler(MessageHandler(Filters.command, unknown))
-
-    # Load saved subscriptions
-    loadSubscriptions()
-
-    # Start the Bot
-    print(f"Bot {NAME} is running...")
-    updater.start_polling()
-
-    # Run the bot until you send a signal to stop
-    updater.idle()
+        logger.info("Initializing bot...")
+        bot = TradingBot()
+        bot.run()
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
-
-

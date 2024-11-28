@@ -1,105 +1,197 @@
-from typing import Optional, Dict, List
-import asyncio
-import time
+"""
+Solana RPC Manager
+================
+
+Handles RPC connections and requests to Solana nodes
+"""
+
 import logging
-from solana.rpc.async_api import AsyncClient
-from solders.pubkey import Pubkey
-from base58 import b58encode, b58decode
+import aiohttp
+import json
+from typing import Optional, Dict, List
+from decimal import Decimal
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class SolanaRPCManager:
-    """Manages Solana RPC connections with failover and rate limiting"""
-
+    """Manages Solana RPC connections and requests"""
+    
     def __init__(self):
-        self.endpoints = {
-            'primary': 'https://api.mainnet-beta.solana.com',
-            'backup': [
-                'https://solana-api.projectserum.com',
-                'https://rpc.ankr.com/solana'
-            ]
-        }
-        self.client: Optional[AsyncClient] = None
-        self.current_endpoint: Optional[str] = None
-        self.retry_count = 3
-        self.timeout = 10
-        self.last_request_time: Dict[str, float] = {}
-        self.min_request_interval = 0.1  # 100ms between requests
+        # RPC endpoints (using devnet for testing)
+        self.endpoints = [
+            "https://api.devnet.solana.com",      # Primary devnet endpoint
+            "https://api.testnet.solana.com",     # Testnet backup
+            "https://api.mainnet-beta.solana.com" # Mainnet as last resort
+        ]
+        self.current_endpoint = 0
+        self.session = None
         self.logger = logging.getLogger(__name__)
+        self.request_timeout = 30  # seconds
+        self.max_retries = 3
 
-    async def initialize(self) -> bool:
-        """Initialize connection to Solana RPC"""
+    async def _ensure_session(self):
+        """Ensure aiohttp session exists"""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.request_timeout)
+            )
+
+    async def _make_request(self, method: str, params: List = None, retry_count: int = 0) -> Optional[Dict]:
+        """Make RPC request with retry logic"""
         try:
-            # Try primary endpoint first
-            self.current_endpoint = self.endpoints['primary']
-            self.client = AsyncClient(self.current_endpoint)
-            result = await self.test_connection()
-            if result:
-                self.logger.info(f"Connected to primary endpoint: {self.current_endpoint}")
-                return True
-            return await self.failover()
-        except Exception as e:
-            self.logger.error(f"Failed to connect to primary endpoint: {e}")
-            return await self.failover()
-
-    async def test_connection(self) -> bool:
-        """Test if current connection is working"""
-        try:
-            response = await self.client.get_version()
-            if response:
-                self.logger.info("Connection test successful")
-                return True
-            return False
-        except Exception as e:
-            self.logger.error(f"Connection test failed: {e}")
-            return False
-
-    async def failover(self) -> bool:
-        """Attempt to connect to backup endpoints"""
-        for endpoint in self.endpoints['backup']:
-            try:
-                self.current_endpoint = endpoint
-                self.client = AsyncClient(endpoint)
-                if await self.test_connection():
-                    self.logger.info(f"Failover successful, connected to: {endpoint}")
-                    return True
-            except Exception as e:
-                self.logger.error(f"Failover attempt failed for {endpoint}: {e}")
-        return False
-
-    async def get_token_data(self, token_address: str) -> Optional[Dict]:
-        """Fetch token metadata and current state"""
-        if not self.client:
-            if not await self.initialize():
-                return None
-
-        # Rate limiting
-        current_time = time.time()
-        if token_address in self.last_request_time:
-            time_since_last = current_time - self.last_request_time[token_address]
-            if time_since_last < self.min_request_interval:
-                await asyncio.sleep(self.min_request_interval - time_since_last)
-
-        try:
-            # Convert string address to Pubkey
-            pubkey = Pubkey.from_string(token_address)
+            await self._ensure_session()
             
-            response = await self.client.get_account_info(pubkey)
-            self.last_request_time[token_address] = time.time()
+            data = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params or []
+            }
+            
+            endpoint = self.endpoints[self.current_endpoint]
+            self.logger.debug(f"Making RPC request to {endpoint}: {method}")
+            
+            async with self.session.post(endpoint, json=data) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    if 'result' in result:
+                        return result['result']
+                    else:
+                        error = result.get('error', {})
+                        self.logger.error(f"RPC error: {error}")
+                        if retry_count < self.max_retries:
+                            self.current_endpoint = (self.current_endpoint + 1) % len(self.endpoints)
+                            return await self._make_request(method, params, retry_count + 1)
+                        return None
+                else:
+                    self.logger.error(f"RPC request failed with status {response.status}")
+                    if retry_count < self.max_retries:
+                        self.current_endpoint = (self.current_endpoint + 1) % len(self.endpoints)
+                        return await self._make_request(method, params, retry_count + 1)
+                    return None
+                    
+        except Exception as e:
+            self.logger.error(f"RPC request failed: {e}")
+            if retry_count < self.max_retries:
+                self.current_endpoint = (self.current_endpoint + 1) % len(self.endpoints)
+                return await self._make_request(method, params, retry_count + 1)
+            return None
+        finally:
+            if retry_count == self.max_retries:
+                self.logger.error(f"Max retries ({self.max_retries}) reached for method {method}")
 
-            if response and hasattr(response, 'value'):
-                return {
-                    'address': str(pubkey),
-                    'data': response.value.data if hasattr(response.value, 'data') else None,
-                    'owner': str(response.value.owner) if hasattr(response.value, 'owner') else None,
-                    'lamports': response.value.lamports if hasattr(response.value, 'lamports') else None,
-                    'executable': response.value.executable if hasattr(response.value, 'executable') else None
-                }
+    async def get_version(self) -> Optional[Dict]:
+        """Get Solana version"""
+        try:
+            return await self._make_request("getVersion")
+        except Exception as e:
+            self.logger.error(f"Error getting version: {e}")
             return None
 
+    async def get_slot(self) -> Optional[int]:
+        """Get current slot"""
+        try:
+            result = await self._make_request("getSlot")
+            return int(result) if result else None
         except Exception as e:
-            self.logger.error(f"Error fetching token data: {e}")
+            self.logger.error(f"Error getting slot: {e}")
+            return None
+
+    async def get_latest_blockhash(self) -> Optional[str]:
+        """Get latest blockhash"""
+        try:
+            # Using newer getLatestBlockhash method with proper params
+            params = [
+                {
+                    "commitment": "confirmed"
+                }
+            ]
+            result = await self._make_request("getLatestBlockhash", params)
+            if result and isinstance(result, dict) and 'value' in result:
+                return result['value'].get('blockhash')
+            
+            # Fallback to older method if needed
+            result = await self._make_request("getRecentBlockhash", [{"commitment": "confirmed"}])
+            if result and isinstance(result, dict) and 'value' in result:
+                return result['value'].get('blockhash')
+                
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting latest blockhash: {e}")
+            return None
+
+    async def get_token_supply(self, token_address: str) -> Optional[int]:
+        """Get token supply"""
+        try:
+            result = await self._make_request(
+                "getTokenSupply",
+                [token_address]
+            )
+            if result and 'value' in result and 'amount' in result['value']:
+                return int(result['value']['amount'])
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting token supply: {e}")
+            return None
+
+    async def get_token_balance(self, account: str) -> Optional[int]:
+        """Get token account balance"""
+        try:
+            result = await self._make_request(
+                "getTokenAccountBalance",
+                [account]
+            )
+            if result and 'value' in result and 'amount' in result['value']:
+                return int(result['value']['amount'])
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting token balance: {e}")
+            return None
+
+    async def get_token_largest_accounts(self, token_address: str) -> Optional[List[Dict]]:
+        """Get largest token accounts"""
+        try:
+            result = await self._make_request(
+                "getTokenLargestAccounts",
+                [token_address]
+            )
+            if result and 'value' in result:
+                return result['value']
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting largest accounts: {e}")
+            return None
+
+    async def get_token_price(self, token_address: str) -> Optional[Decimal]:
+        """Get token price in SOL using liquidity pools"""
+        try:
+            # For testing, return mock price
+            # In production, would calculate from liquidity pools
+            return Decimal('0.1')
+            
+        except Exception as e:
+            self.logger.error(f"Error getting token price: {e}")
+            return None
+
+    async def get_block_time(self, slot: int) -> Optional[int]:
+        """Get block time for slot"""
+        try:
+            result = await self._make_request(
+                "getBlockTime",
+                [slot]
+            )
+            return int(result) if result else None
+        except Exception as e:
+            self.logger.error(f"Error getting block time: {e}")
             return None
 
     async def close(self):
-        """Clean up connections"""
-        if self.client:
-            await self.client.close()
+        """Close aiohttp session"""
+        if self.session and not self.session.closed:
+            try:
+                await self.session.close()
+                self.session = None
+                self.logger.debug("RPC session closed")
+            except Exception as e:
+                self.logger.error(f"Error closing RPC session: {e}")
