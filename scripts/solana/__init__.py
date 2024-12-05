@@ -3,20 +3,14 @@ Solana Trading Module
 ===================
 
 This module provides functionality for:
-- RPC connection management
-- Token tracking and price updates
+- Token tracking
 - Trading operations
-- Position management
+- Price monitoring
+- Bot commands
 """
 
-from .rpc_manager import SolanaRPCManager
 from .token_tracker import TokenTracker
 from .trading_engine import TradingEngine
-from .bot_commands import TradingCommands
+from .bot_commands import BotCommands
 
-__all__ = [
-    'SolanaRPCManager',
-    'TokenTracker',
-    'TradingEngine',
-    'TradingCommands'
-]
+__all__ = ['TokenTracker', 'TradingEngine', 'BotCommands']

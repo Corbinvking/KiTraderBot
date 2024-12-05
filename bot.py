@@ -14,265 +14,167 @@ This bot provides trading functionality through Telegram, supporting:
 
 import os
 import sys
-import asyncio
+import json
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
-)
+import asyncio
+import asyncpg
+from telegram.ext import Application, CommandHandler
+from scripts.solana.bot_commands import BotCommands
+from scripts.solana.trading_engine import TradingEngine
+from scripts.solana.token_tracker import TokenTracker
+from scripts.solana.birdeye_client import BirdeyeClient
 
-# Configure logging
+# Setup logging
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    handlers=[
-        logging.FileHandler('/var/log/kitraderbot/bot.log'),
-        logging.FileHandler('/var/log/kitraderbot/error.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# Add project root to Python path
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
-from scripts.user_management import UserManager, UserRole
-from scripts.solana import SolanaRPCManager, TokenTracker, TradingEngine
-from scripts.solana.bot_commands import TradingCommands
-
-class TradingBot:
-    def __init__(self):
-        try:
-            # Load token
-            token_path = os.path.join(project_root, "tokens/telegram")
-            with open(token_path, 'r') as f:
-                self.token = f.read().strip()
-                
-            self.user_manager = UserManager()
-            self.rpc_manager = SolanaRPCManager()
-            self.token_tracker = None
-            self.trading_engine = None
-            self.trading_commands = None
-            self.db_pool = None
-            self.application = None
-            logger.info("Bot initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing bot: {e}")
-            raise
-
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send a message when the command /start is issued."""
-        try:
-            user = update.effective_user
-            # Initialize user in database
-            await self.user_manager.add_user(
-                user_id=user.id,
-                username=user.username or user.first_name,
-                role=UserRole.BASIC
-            )
-            
-            message = (
-                f"Hi {user.first_name}! Welcome to Solana Trading Bot!\n\n"
-                f"This bot allows you to:\n"
-                f"• Trade Solana tokens\n"
-                f"• Track positions\n"
-                f"• Monitor prices\n\n"
-                f"Use /help to see available commands."
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("💰 Open Wallet", callback_data='view_wallet'),
-                    InlineKeyboardButton("📈 Start Trading", callback_data='open_position')
-                ],
-                [
-                    InlineKeyboardButton("❓ Help", callback_data='show_help'),
-                    InlineKeyboardButton("⚙️ Settings", callback_data='show_settings')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                message,
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-            logger.info(f"Start command sent to user {user.id}")
-        except Exception as e:
-            logger.error(f"Error in start command: {e}", exc_info=True)
-            await update.message.reply_text(
-                "Welcome! Use /help to see available commands.\n\n"
-                "If you experience any issues, please try again."
-            )
-
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send a message when the command /help is issued."""
-        try:
-            help_text = (
-                "*Available Commands*\n\n"
-                "💰 *Wallet Commands:*\n"
-                "`/wallet` - Show your wallet balance and positions\n"
-                "`/positions` - List your open positions\n"
-                "`/positions closed` - List your closed positions\n\n"
-                "📈 *Trading Commands:*\n"
-                "`/open <token_address> <size_sol> <type>` - Open a new position\n"
-                "`/close <position_id>` - Close an existing position\n"
-                "`/price <token_address>` - Get current token price\n"
-                "`/info <token_address>` - Get token information\n\n"
-                "⚙️ *Settings:*\n"
-                "`/settings` - View your account settings"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("💰 Wallet", callback_data='view_wallet'),
-                    InlineKeyboardButton("📊 Positions", callback_data='view_positions')
-                ],
-                [
-                    InlineKeyboardButton("📈 Trade", callback_data='open_position'),
-                    InlineKeyboardButton("⚙️ Settings", callback_data='show_settings')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                help_text,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            logger.info(f"Help command sent to user {update.effective_user.id}")
-        except Exception as e:
-            logger.error(f"Error in help command: {e}", exc_info=True)
-            await update.message.reply_text("Error displaying help message. Please try again.")
-
-    async def unknown(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle unknown commands."""
-        try:
-            await update.message.reply_text(
-                f"Sorry, I didn't understand command: {update.message.text}\n"
-                f"Use /help to see available commands."
-            )
-            logger.info(f"Unknown command from user {update.effective_user.id}: {update.message.text}")
-        except Exception as e:
-            logger.error(f"Error handling unknown command: {e}")
-
-    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle errors."""
-        logger.error(f"Exception while handling an update: {context.error}")
-        if update and isinstance(update, Update) and update.effective_message:
-            await update.effective_message.reply_text(
-                "Sorry, an error occurred while processing your request. Please try again."
-            )
-
-    async def initialize(self) -> None:
-        """Initialize bot components"""
-        try:
-            logger.info("Starting initialization...")
-            
-            # Initialize database
-            self.db_pool = await self.user_manager.init_db()
-            logger.info("Database initialized")
-            
-            # Initialize Solana components
-            self.token_tracker = TokenTracker(self.rpc_manager, self.db_pool)
-            self.trading_engine = TradingEngine(self.db_pool, self.token_tracker, self.user_manager)
-            self.trading_commands = TradingCommands(self.trading_engine, self.token_tracker)
-            logger.info("Solana components initialized")
-            
-            # Create the Application
-            self.application = Application.builder().token(self.token).build()
-            logger.info("Application created")
-
-            # Add handlers
-            self.application.add_handler(CommandHandler("start", self.start))
-            self.application.add_handler(CommandHandler("help", self.help))
-            
-            # Setup trading commands
-            self.application.add_handler(CommandHandler("wallet", self.trading_commands.cmd_wallet))
-            self.application.add_handler(CommandHandler("open", self.trading_commands.cmd_open_position))
-            self.application.add_handler(CommandHandler("close", self.trading_commands.cmd_close_position))
-            self.application.add_handler(CommandHandler("positions", self.trading_commands.cmd_positions))
-            self.application.add_handler(CommandHandler("info", self.trading_commands.cmd_info))
-            self.application.add_handler(CommandHandler("price", self.trading_commands.cmd_price))
-            self.application.add_handler(CommandHandler("settings", self.trading_commands.cmd_settings))
-            
-            # Add callback query handler
-            self.application.add_handler(CallbackQueryHandler(self.trading_commands.callback_handler))
-            
-            # Unknown command handler
-            self.application.add_handler(MessageHandler(filters.COMMAND, self.unknown))
-            
-            # Error handler
-            self.application.add_error_handler(self.error_handler)
-            
-            logger.info("Bot components initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize bot components: {e}")
-            raise
-
-    async def cleanup(self) -> None:
-        """Cleanup resources"""
-        logger.info("Starting cleanup...")
-        try:
-            if self.db_pool:
-                await self.db_pool.close()
-                logger.info("Database connection closed")
-            if self.application:
-                await self.application.stop()
-                await self.application.shutdown()
-                logger.info("Application stopped")
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-
-    def run(self) -> None:
-        """Run the bot."""
-        try:
-            # Initialize event loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            # Initialize components
-            loop.run_until_complete(self.initialize())
-            
-            logger.info("Starting bot...")
-            
-            # Run the application
-            self.application.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-                close_loop=False
-            )
-            
-        except Exception as e:
-            logger.error(f"Error running bot: {e}", exc_info=True)
-            raise
-        finally:
-            try:
-                # Cleanup
-                if 'loop' in locals():
-                    loop.run_until_complete(self.cleanup())
-                    loop.close()
-                logger.info("Bot shutdown complete")
-            except Exception as e:
-                logger.error(f"Error during cleanup: {e}", exc_info=True)
-
-def main() -> None:
-    """Start the bot."""
+async def start_command(update, context):
+    """Handle the /start command"""
     try:
-        logger.info("Initializing bot...")
-        bot = TradingBot()
-        bot.run()
+        async with context.bot_data['db_pool'].acquire() as conn:
+            user_id = update.effective_user.id
+            user = await conn.fetchrow('SELECT * FROM users WHERE telegram_id = $1', user_id)
+            
+            if not user:
+                await conn.execute(
+                    'INSERT INTO users (telegram_id, username, role) VALUES ($1, $2, $3)',
+                    user_id, update.effective_user.username, 'basic'
+                )
+                await update.message.reply_text('Welcome! You have been registered as a new user.')
+            else:
+                await update.message.reply_text(f'Welcome back! Your role is: {user["role"]}')
     except Exception as e:
-        logger.error(f"Bot failed to start: {e}", exc_info=True)
+        logger.error(f"Database error in start_command: {e}")
+        await update.message.reply_text("An error occurred. Please try again later.")
+
+async def error_handler(update, context):
+    """Handle errors"""
+    logger.error(f"Error: {context.error}")
+
+def load_config():
+    """Load configuration from config.json"""
+    try:
+        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load config: {e}")
+        raise
+
+async def init_database(config):
+    """Initialize database connection pool"""
+    try:
+        db_config = config['database']
+        pool = await asyncpg.create_pool(
+            host=db_config['host'],
+            port=db_config['port'],
+            database=db_config['database'],
+            user=db_config['user'],
+            password=db_config['password'],
+            min_size=5,
+            max_size=10
+        )
+        async with pool.acquire() as conn:
+            version = await conn.fetchval('SELECT version()')
+            logger.info(f"Connected to PostgreSQL: {version}")
+        return pool
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
+
+async def init_components(application: Application, db_pool):
+    """Initialize bot components"""
+    try:
+        # Initialize BirdEye client
+        birdeye_client = BirdeyeClient(application.bot_data['birdeye_api_key'])
+        
+        # Initialize TokenTracker
+        token_tracker = TokenTracker(db_pool, birdeye_client)
+        
+        # Initialize TradingEngine
+        trading_engine = TradingEngine(db_pool, token_tracker, birdeye_client)
+        await trading_engine.initialize()
+        
+        # Initialize BotCommands
+        bot_commands = BotCommands(trading_engine, token_tracker)
+        
+        # Store in application context
+        application.bot_data.update({
+            'birdeye_client': birdeye_client,
+            'token_tracker': token_tracker,
+            'trading_engine': trading_engine,
+            'bot_commands': bot_commands
+        })
+        
+        return bot_commands
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize components: {e}")
+        raise
+
+async def post_init(application: Application):
+    """Post initialization hook"""
+    # Initialize database
+    config = application.bot_data['config']
+    db_pool = await init_database(config)
+    application.bot_data['db_pool'] = db_pool
+    
+    # Initialize components
+    bot_commands = await init_components(application, db_pool)
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", bot_commands.cmd_start))
+    application.add_handler(CommandHandler("commands", bot_commands.cmd_commands))
+    application.add_handler(CommandHandler("test_mode", bot_commands.cmd_test_mode))
+    
+    # Add callback query handler
+    from telegram.ext import CallbackQueryHandler
+    application.add_handler(CallbackQueryHandler(bot_commands.callback_handler))
+    
+    logger.info("Bot initialized successfully!")
+
+async def post_shutdown(application: Application):
+    """Post shutdown hook"""
+    if 'db_pool' in application.bot_data:
+        await application.bot_data['db_pool'].close()
+        logger.info("Database connection closed")
+
+def main():
+    """Main function to run the bot"""
+    try:
+        # Load config
+        config = load_config()
+        
+        # Create application
+        application = (
+            Application.builder()
+            .token(config['telegram_token'])
+            .post_init(post_init)
+            .post_shutdown(post_shutdown)
+            .build()
+        )
+        
+        # Store config in bot_data
+        application.bot_data['config'] = config
+        application.bot_data['birdeye_api_key'] = config['birdeye_api_key']
+
+        # Add error handler only (other handlers added in post_init)
+        application.add_error_handler(error_handler)
+        
+        # Start the bot
+        logger.info("Starting bot...")
+        application.run_polling(drop_pending_updates=True)
+
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot failed: {e}")
         sys.exit(1)
 
 if __name__ == '__main__':
     main()
+

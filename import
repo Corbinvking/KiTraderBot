@@ -1,0 +1,30 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-8.3.4, pluggy-1.5.0
+rootdir: /opt/KiTraderBot
+plugins: xprocess-1.0.2, anyio-4.6.2.post1, asyncio-0.24.0
+asyncio: mode=Mode.STRICT, default_loop_scope=None
+collected 0 items / 2 errors
+
+==================================== ERRORS ====================================
+____________________ ERROR collecting scripts/solana/tests _____________________
+Defining 'pytest_plugins' in a non-top-level conftest is no longer supported:
+It affects the entire test suite instead of just below the conftest as expected.
+  /opt/KiTraderBot/scripts/solana/tests/conftest.py
+Please move it to a top level conftest file at the rootdir:
+  /opt/KiTraderBot
+For more information, visit:
+  https://docs.pytest.org/en/stable/deprecations.html#pytest-plugins-in-non-top-level-conftest-files
+_______________________ ERROR collecting test_solana.py ________________________
+ImportError while importing test module '/opt/KiTraderBot/test_solana.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+test_solana.py:9: in <module>
+    from scripts.solana.rpc_manager import SolanaRPCManager
+E   ModuleNotFoundError: No module named 'scripts'
+=========================== short test summary info ============================
+ERROR scripts/solana/tests - Failed: Defining 'pytest_plugins' in a non-top-l...
+ERROR test_solana.py
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!
+============================== 2 errors in 1.33s ===============================

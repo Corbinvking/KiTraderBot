@@ -1,0 +1,11 @@
+{
+    "telegram_token": "7318929635:AAGaXaGv6caC3lD7-e56NHenkMyjEsEm14Y",
+    "birdeye_api_key": "65cce27c021346ea85203479dae66ccd",
+    "database": {
+        "host": "localhost",
+        "port": 5432,
+        "database": "fantasysol",
+        "user": "postgres",
+        "password": "password"
+    }
+}
