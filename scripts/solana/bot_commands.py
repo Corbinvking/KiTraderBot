@@ -2,611 +2,1172 @@
 Telegram Bot Commands for Solana Trading
 ======================================
 
-This module implements the Telegram bot commands for:
-- Wallet management
-- Position opening/closing
-- Position monitoring
-- Token information
+This file handles all Telegram bot interactions including:
+1. Main menu and navigation
+2. Trading operations (buy/sell)
+3. Account management
+4. Help and support
+
+File Structure:
+- Class initialization
+- Main command handlers (/start, /commands, etc.)
+- Menu display methods (show_trading_menu, show_account_menu, etc.)
+- Action handlers (handle_trade_action, handle_account_action, etc.)
+- Helper methods
+
+UI Customization:
+- Messages and button texts can be edited directly in the relevant sections
+- Each menu has its own method for easy customization
+- Error messages are centralized for consistent messaging
 """
 
 import logging
 from decimal import Decimal
 from typing import Optional, Dict
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    CommandHandler, CallbackContext, CallbackQueryHandler,
-    MessageHandler, filters
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from telegram.ext import ContextTypes
+
 from .trading_engine import TradingEngine
 from .token_tracker import TokenTracker
 
 logger = logging.getLogger(__name__)
 
-class TradingCommands:
-    """Handles all trading-related bot commands"""
+#------------------------------------------------------------------------------
+# UI Text Templates
+#------------------------------------------------------------------------------
+
+# Main Menu Messages
+MESSAGES = {
+    'welcome': {
+        'title': "🤖 *Welcome to KiTraderBot!*",
+        'description': """
+Your advanced Solana trading assistant.
+
+*Features:*
+• Real-time token tracking
+• Position management
+• Risk monitoring
+• Performance analytics
+
+Select an option to begin:""",
+    },
+    
+    'trading': {
+        'menu': """
+*Trading Menu*
+
+Select your trading action:
+• Buy - Purchase tokens
+• Sell - Sell tokens
+• Positions - View your holdings
+• Wallet - Check your balance""",
+        
+        'buy_token': """
+*Select Token to Buy*
+
+Choose from popular tokens or search:
+• SOL - Solana
+• USDC - USD Coin
+• Search for other tokens""",
+        
+        'sell_token': """
+*Select Token to Sell*
+
+Choose from your holdings:
+• View balance
+• Recent trades
+• Search holdings"""
+    },
+    
+    'account': {
+        'menu': """
+*Account Menu*
+
+Manage your account:
+• View balance
+• Check statistics
+• Configure settings""",
+        
+        'balance': """
+*Wallet Balance*
+
+💰 Available: {available} SOL
+🔒 Locked: {locked} SOL
+📈 Total Value: ${total}""",
+        
+        'stats': """
+*Trading Statistics*
+
+📊 Total Trades: {total_trades}
+✅ Profitable: {profitable}
+❌ Unprofitable: {unprofitable}
+📈 ROI: {roi}%"""
+    },
+    
+    'help': {
+        'menu': """
+*Help & Information*
+
+Get help with:
+• Getting started with trading
+• Understanding trading features
+• Common questions
+• Technical support
+
+Select a topic:""",
+        
+        'getting_started': """
+*Getting Started Guide*
+
+1. Connect your wallet
+2. Fund your account
+3. Start trading
+
+Need help? Contact support."""
+    },
+    
+    'errors': {
+        'general': "An error occurred. Please try again.",
+        'invalid_action': "Invalid action. Please try again.",
+        'not_implemented': "This feature is coming soon...",
+        'no_permission': "You don't have permission for this action.",
+        'service_unavailable': "Service temporarily unavailable."
+    },
+    
+    'commands': {
+        'menu': """
+*Available Commands*
+
+📈 *Trading Commands*
+/trade - Open trading menu
+/price <token> - Get token price
+/positions - View open positions
+/history - Trading history
+
+💼 *Account Commands*
+/wallet - View wallet balance
+/settings - Account settings
+/stats - Trading statistics
+
+🔔 *Alert Commands*
+/alerts - Manage price alerts
+/notify - Notification settings""",
+    },
+}
+
+# Button Labels
+BUTTONS = {
+    'main_menu': {
+        'trading': "🚀 Start Trading",
+        'account': "💰 My Account",
+        'commands': "📈 Commands",
+        'help': "ℹ️ Help & Info"
+    },
+    
+    'trading': {
+        'buy': "💵 Buy",
+        'sell': "💸 Sell",
+        'positions': "📊 My Positions",
+        'wallet': "💰 My Wallet"
+    },
+    
+    'account': {
+        'balance': "💰 Balance",
+        'stats': "📈 Statistics",
+        'settings': "⚙️ Settings",
+        'history': "📜 History"
+    },
+    
+    'navigation': {
+        'back': "🔙 Back",
+        'back_main': "🔙 Main Menu",
+        'back_trading': "🔙 Back to Trading",
+        'back_account': "🔙 Back to Account"
+    }
+}
+
+# Callback Data - Used for button actions
+CALLBACKS = {
+    'main': {
+        'trading': 'start_trading',
+        'account': 'view_account',
+        'commands': 'show_commands',
+        'help': 'show_help'
+    },
+    'navigation': {
+        'back_main': 'back_main',
+        'back_trading': 'back_trading',
+        'back_account': 'back_account',
+        'back_commands': 'back_commands',
+        'back_help': 'back_help'
+    },
+    'trading': {
+        'buy': 'trade_buy',
+        'sell': 'trade_sell',
+        'positions': 'trade_positions',
+        'wallet': 'trade_wallet'
+    },
+    'account': {
+        'balance': 'account_balance',
+        'stats': 'account_stats',
+        'settings': 'account_settings',
+        'history': 'account_history'
+    },
+    'help': {
+        'start': 'help_start',
+        'trading': 'help_trading',
+        'faq': 'help_faq',
+        'support': 'help_support'
+    },
+    'commands': {
+        'trading': 'command_trading',
+        'account': 'command_account',
+        'alerts': 'command_alerts',
+        'help': 'command_help',
+        'price_alerts': 'command_price_alerts',
+        'notifications': 'command_notifications',
+        'active_alerts': 'command_active_alerts',
+        'alert_history': 'command_alert_history',
+        'positions': 'command_positions',
+        'wallet': 'command_wallet',
+        'markets': 'command_markets'
+    }
+}
+
+#------------------------------------------------------------------------------
+# Menu Builders - Functions to create consistent menu layouts
+#------------------------------------------------------------------------------
+
+def build_main_menu() -> InlineKeyboardMarkup:
+    """Build the main menu keyboard"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🚀 Start Trading", callback_data=CALLBACKS['main']['trading']),
+            InlineKeyboardButton("💰 My Account", callback_data=CALLBACKS['main']['account'])
+        ],
+        [
+            InlineKeyboardButton("📈 Commands", callback_data=CALLBACKS['main']['commands']),
+            InlineKeyboardButton("ℹ️ Help & Info", callback_data=CALLBACKS['main']['help'])
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_trading_menu() -> InlineKeyboardMarkup:
+    """Build the trading menu keyboard"""
+    keyboard = [
+        [
+            InlineKeyboardButton("💵 Buy", callback_data=CALLBACKS['trading']['buy']),
+            InlineKeyboardButton("💸 Sell", callback_data=CALLBACKS['trading']['sell'])
+        ],
+        [
+            InlineKeyboardButton("📊 Positions", callback_data=CALLBACKS['trading']['positions']),
+            InlineKeyboardButton("💰 Wallet", callback_data=CALLBACKS['trading']['wallet'])
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data=CALLBACKS['navigation']['back_main'])
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_account_menu() -> InlineKeyboardMarkup:
+    """Build the account menu keyboard"""
+    keyboard = [
+        [
+            InlineKeyboardButton(BUTTONS['account']['balance'], callback_data=CALLBACKS['account']['balance']),
+            InlineKeyboardButton(BUTTONS['account']['stats'], callback_data=CALLBACKS['account']['stats'])
+        ],
+        [
+            InlineKeyboardButton(BUTTONS['account']['settings'], callback_data=CALLBACKS['account']['settings']),
+            InlineKeyboardButton(BUTTONS['account']['history'], callback_data=CALLBACKS['account']['history'])
+        ],
+        [
+            InlineKeyboardButton(BUTTONS['navigation']['back'], callback_data=CALLBACKS['navigation']['back_main'])
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_back_button(callback_data: str) -> InlineKeyboardMarkup:
+    """Build a single back button"""
+    keyboard = [[
+        InlineKeyboardButton(BUTTONS['navigation']['back'], callback_data=callback_data)
+    ]]
+    return InlineKeyboardMarkup(keyboard)
+
+def build_commands_menu() -> InlineKeyboardMarkup:
+    """Build the commands menu keyboard"""
+    keyboard = [
+        [
+            InlineKeyboardButton("📈 Trading", callback_data=CALLBACKS['commands']['trading']),
+            InlineKeyboardButton("💼 Account", callback_data=CALLBACKS['commands']['account'])
+        ],
+        [
+            InlineKeyboardButton("🔔 Alerts", callback_data=CALLBACKS['commands']['alerts']),
+            InlineKeyboardButton("ℹ️ Help", callback_data=CALLBACKS['commands']['help'])
+        ],
+        [
+            InlineKeyboardButton("🔙 Back", callback_data=CALLBACKS['navigation']['back_main'])
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+class BotCommands:
+    """
+    Main bot command handler class
+    
+    This class manages all bot interactions and menu navigation.
+    Each method represents either a command handler or a menu display.
+    """
     
     def __init__(self, trading_engine: TradingEngine, token_tracker: TokenTracker):
+        """Initialize bot with required components"""
         self.trading_engine = trading_engine
         self.token_tracker = token_tracker
-        self.user_manager = trading_engine.user_manager
+        self.test_mode = False  # For development testing
 
-    async def cmd_help(self, update: Update, context: CallbackContext) -> None:
-        """Show help information"""
+    #--------------------------------------------------------------------------
+    # Main Command Handlers
+    #--------------------------------------------------------------------------
+    
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /start command"""
         try:
-            help_text = (
-                "*Available Commands*\n\n"
-                "💰 *Wallet Commands:*\n"
-                "`/wallet` - Show your wallet balance and positions\n"
-                "`/positions` - List your open positions\n"
-                "`/positions closed` - List your closed positions\n\n"
-                "📈 *Trading Commands:*\n"
-                "`/open <token_address> <size_sol> <type>` - Open a new position\n"
-                "`/close <position_id>` - Close an existing position\n"
-                "`/price <token_address>` - Get current token price\n"
-                "`/info <token_address>` - Get token information\n\n"
-                "⚙️ *Settings:*\n"
-                "`/settings` - View your account settings"
+            # Add test mode indicator if enabled
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            
+            await update.message.reply_text(
+                f"{prefix}{MESSAGES['welcome']['title']}\n\n{MESSAGES['welcome']['description']}",
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
             )
             
+        except Exception as e:
+            logger.error(f"Error in start command: {e}")
+            await update.message.reply_text(MESSAGES['errors']['general'])
+
+    async def cmd_commands(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Main command menu with categories"""
+        try:
             keyboard = [
                 [
-                    InlineKeyboardButton("💰 Wallet", callback_data='view_wallet'),
-                    InlineKeyboardButton("📊 Positions", callback_data='view_positions')
+                    InlineKeyboardButton("📈 Trading Commands", callback_data='command_trading'),
+                    InlineKeyboardButton("💼 Account Management", callback_data='command_account')
                 ],
                 [
-                    InlineKeyboardButton("📈 Trade", callback_data='open_position'),
-                    InlineKeyboardButton("⚙️ Settings", callback_data='show_settings')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                help_text,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            logger.info(f"Help command sent to user {update.effective_user.id}")
-        except Exception as e:
-            logger.error(f"Error in help command: {e}")
-            await update.message.reply_text("Error displaying help message. Please try again.")
-
-    async def cmd_wallet(self, update: Update, context: CallbackContext) -> None:
-        """Show user's wallet balance and positions"""
-        try:
-            user_id = update.effective_user.id
-            wallet = await self.trading_engine.get_wallet(user_id)
-            
-            if not wallet:
-                await update.message.reply_text("Error accessing wallet.")
-                return
-            
-            # Get open positions
-            positions = await self.trading_engine.get_positions(user_id, status='open')
-            
-            # Format wallet info
-            message = (
-                f"💰 *Wallet Balance*: {wallet['balance']:.4f} SOL\n\n"
-                f"📊 *Open Positions*: {len(positions)}\n"
-            )
-            
-            if positions:
-                message += "\n*Current Positions:*\n"
-                for pos in positions:
-                    pnl = pos['pnl_sol'] if 'pnl_sol' in pos else Decimal('0')
-                    message += (
-                        f"ID: `{pos['position_id']}`\n"
-                        f"Token: {pos['symbol']}\n"
-                        f"Size: {pos['size_sol']:.4f} SOL\n"
-                        f"PnL: {pnl:.4f} SOL\n"
-                        f"Type: {pos['position_type']}\n\n"
-                    )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("📈 Open Position", callback_data='open_position'),
-                    InlineKeyboardButton("📊 View Positions", callback_data='view_positions')
+                    InlineKeyboardButton("🔔 Alerts & Notifications", callback_data='command_alerts'),
+                    InlineKeyboardButton("ℹ️ Help Center", callback_data='command_help')
                 ],
                 [
-                    InlineKeyboardButton("🔄 Refresh", callback_data='refresh_wallet')
+                    InlineKeyboardButton(BUTTONS['navigation']['back'], callback_data='back_main')
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
+            prefix = "[TEST MODE] " if self.test_mode else ""
             await update.message.reply_text(
-                message,
+                f"{prefix}{MESSAGES['commands']['menu']}",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
             
         except Exception as e:
-            logger.error(f"Error in wallet command: {e}")
-            await update.message.reply_text("Error processing wallet command.")
+            logger.error(f"Error showing commands: {e}")
+            await update.message.reply_text(MESSAGES['errors']['general'])
 
-    async def cmd_open_position(self, update: Update, context: CallbackContext) -> None:
-        """Open a new trading position"""
-        try:
-            args = context.args
-            if len(args) < 3:
-                message = (
-                    "*Open New Position*\n\n"
-                    "Use the command format:\n"
-                    "`/open <token_address> <size_sol> <type>`\n\n"
-                    "Example:\n"
-                    "`/open EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 10 long`\n\n"
-                    "*Position Types:*\n"
-                    "• long - Buy position\n"
-                    "• short - Sell position"
-                )
-                await update.message.reply_text(message, parse_mode='Markdown')
-                return
-            
-            token_address = args[0]
-            size_sol = Decimal(args[1])
-            position_type = args[2].lower()
-            
-            if position_type not in ['long', 'short']:
-                await update.message.reply_text("Position type must be 'long' or 'short'")
-                return
-            
-            # Open position
-            position = await self.trading_engine.open_position(
-                user_id=update.effective_user.id,
-                token_address=token_address,
-                size_sol=size_sol,
-                position_type=position_type
-            )
-            
-            if position:
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            "❌ Close Position", 
-                            callback_data=f"close_{position['position_id']}"
-                        ),
-                        InlineKeyboardButton(
-                            "�� View Details", 
-                            callback_data=f"details_{position['position_id']}"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton("📈 Open Another", callback_data='open_position'),
-                        InlineKeyboardButton("💰 View Wallet", callback_data='view_wallet')
-                    ]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    f"Position opened successfully!\n"
-                    f"ID: `{position['position_id']}`\n"
-                    f"Entry Price: {position['entry_price']:.4f} SOL\n"
-                    f"Size: {position['size']:.4f} SOL\n"
-                    f"Type: {position['type']}",
-                    parse_mode='Markdown',
-                    reply_markup=reply_markup
-                )
-            else:
-                await update.message.reply_text("Failed to open position.")
-                
-        except ValueError as e:
-            await update.message.reply_text(f"Error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error opening position: {e}")
-            await update.message.reply_text("Error processing open position command.")
-
-    async def cmd_close_position(self, update: Update, context: CallbackContext) -> None:
-        """Close an existing position"""
-        try:
-            if not context.args:
-                message = (
-                    "*Close Position*\n\n"
-                    "Use the command format:\n"
-                    "`/close <position_id>`\n\n"
-                    "Example:\n"
-                    "`/close 123`\n\n"
-                    "Use /positions to see your open positions."
-                )
-                await update.message.reply_text(message, parse_mode='Markdown')
-                return
-            
-            position_id = int(context.args[0])
-            
-            # Close position
-            result = await self.trading_engine.close_position(position_id)
-            
-            if result:
-                keyboard = [
-                    [
-                        InlineKeyboardButton("📈 Open New Position", callback_data='open_position'),
-                        InlineKeyboardButton("📊 View History", callback_data='view_history')
-                    ],
-                    [
-                        InlineKeyboardButton("💰 View Wallet", callback_data='view_wallet')
-                    ]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    f"Position closed successfully!\n"
-                    f"Exit Price: {result['exit_price']:.4f} SOL\n"
-                    f"PnL: {result['pnl']:.4f} SOL",
-                    parse_mode='Markdown',
-                    reply_markup=reply_markup
-                )
-            else:
-                await update.message.reply_text("Failed to close position.")
-                
-        except ValueError as e:
-            await update.message.reply_text(f"Error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error closing position: {e}")
-            await update.message.reply_text("Error processing close position command.")
-
-    async def cmd_positions(self, update: Update, context: CallbackContext) -> None:
-        """Show user's positions"""
-        try:
-            status = 'open'
-            if context.args and context.args[0].lower() in ['open', 'closed']:
-                status = context.args[0].lower()
-            
-            positions = await self.trading_engine.get_positions(
-                update.effective_user.id, 
-                status=status
-            )
-            
-            if not positions:
-                keyboard = [
-                    [
-                        InlineKeyboardButton("📈 Open Position", callback_data='open_position'),
-                        InlineKeyboardButton("💰 View Wallet", callback_data='view_wallet')
-                    ]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                await update.message.reply_text(
-                    f"No {status} positions found.",
-                    reply_markup=reply_markup
-                )
-                return
-            
-            message = f"*{status.title()} Positions:*\n\n"
-            for pos in positions:
-                pnl = pos['pnl_sol'] if 'pnl_sol' in pos else Decimal('0')
-                message += (
-                    f"ID: `{pos['position_id']}`\n"
-                    f"Token: {pos['symbol']}\n"
-                    f"Size: {pos['size_sol']:.4f} SOL\n"
-                    f"Entry: {pos['entry_price_sol']:.4f} SOL\n"
-                    f"PnL: {pnl:.4f} SOL\n"
-                    f"Type: {pos['position_type']}\n\n"
-                )
-            
-            keyboard = []
-            if status == 'open':
-                keyboard.append([
-                    InlineKeyboardButton("❌ Close All", callback_data='close_all'),
-                    InlineKeyboardButton("📊 View Closed", callback_data='view_closed')
-                ])
-            else:
-                keyboard.append([
-                    InlineKeyboardButton("📈 Open New", callback_data='open_position'),
-                    InlineKeyboardButton("📊 View Open", callback_data='view_open')
-                ])
-            
-            keyboard.append([
-                InlineKeyboardButton("🔄 Refresh", callback_data=f'refresh_{status}'),
-                InlineKeyboardButton("💰 View Wallet", callback_data='view_wallet')
-            ])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in positions command: {e}")
-            await update.message.reply_text("Error retrieving positions.")
-
-    async def cmd_info(self, update: Update, context: CallbackContext) -> None:
-        """Get token information"""
-        try:
-            args = context.args
-            if not args:
-                message = (
-                    "*Token Information*\n\n"
-                    "Use the command format:\n"
-                    "`/info <token_address>`\n\n"
-                    "Example:\n"
-                    "`/info EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`"
-                )
-                await update.message.reply_text(message, parse_mode='Markdown')
-                return
-
-            token_address = args[0]
-            token_info = await self.token_tracker.get_token_info(token_address)
-            
-            if not token_info:
-                await update.message.reply_text("Token not found.")
-                return
-            
-            # Get current price
-            price = await self.token_tracker.get_latest_price(token_address)
-            
-            message = (
-                f"*Token Information*\n\n"
-                f"Address: `{token_info['token_address']}`\n"
-                f"Symbol: {token_info['symbol'] or 'Unknown'}\n"
-                f"Name: {token_info['name'] or 'Unknown'}\n"
-                f"Price: {price:.4f} SOL\n"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("📈 Trade", callback_data=f'trade_{token_address}'),
-                    InlineKeyboardButton("🔄 Refresh", callback_data=f'refresh_info_{token_address}')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in info command: {e}")
-            await update.message.reply_text("Error getting token information.")
-
-    async def cmd_settings(self, update: Update, context: CallbackContext) -> None:
-        """View and modify user settings"""
-        try:
-            user_id = update.effective_user.id
-            user = await self.user_manager.get_user(user_id)
-            
-            if not user:
-                await update.message.reply_text("User not found.")
-                return
-            
-            message = (
-                f"*User Settings*\n\n"
-                f"User ID: `{user_id}`\n"
-                f"Username: {user['username']}\n"
-                f"Role: {user['role']}\n"
-                f"Created: {user['created_at']}\n\n"
-                f"*Trading Settings*\n"
-                f"Max Position Size: {self.trading_engine.position_limits[user['role']]} SOL\n"
-                f"Max Leverage: 1.0x\n"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("📊 Trading History", callback_data='view_history'),
-                    InlineKeyboardButton("⚙️ Preferences", callback_data='edit_preferences')
-                ],
-                [
-                    InlineKeyboardButton("🔄 Refresh", callback_data='refresh_settings')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in settings command: {e}")
-            await update.message.reply_text("Error accessing settings.")
-
-    async def cmd_price(self, update: Update, context: CallbackContext) -> None:
-        """Get current token price"""
-        try:
-            args = context.args
-            if not args:
-                message = (
-                    "*Token Price*\n\n"
-                    "Use the command format:\n"
-                    "`/price <token_address>`\n\n"
-                    "Example:\n"
-                    "`/price EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`"
-                )
-                await update.message.reply_text(message, parse_mode='Markdown')
-                return
-
-            token_address = args[0]
-            token_info = await self.token_tracker.get_token_info(token_address)
-            
-            if not token_info:
-                await update.message.reply_text("Token not found.")
-                return
-            
-            # Get current price
-            price = await self.token_tracker.get_latest_price(token_address)
-            
-            message = (
-                f"*Current Price*\n\n"
-                f"Token: {token_info['symbol'] or token_address}\n"
-                f"Price: {price:.4f} SOL\n"
-            )
-            
-            keyboard = [
-                [
-                    InlineKeyboardButton("📈 Trade", callback_data=f'trade_{token_address}'),
-                    InlineKeyboardButton("ℹ️ Info", callback_data=f'info_{token_address}')
-                ],
-                [
-                    InlineKeyboardButton("🔄 Refresh", callback_data=f'refresh_price_{token_address}')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text(
-                message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in price command: {e}")
-            await update.message.reply_text("Error getting token price.")
-
-    async def callback_handler(self, update: Update, context: CallbackContext) -> None:
-        """Handle callback queries from inline keyboards"""
+    #--------------------------------------------------------------------------
+    # Callback Handlers - Handle button clicks and menu navigation
+    #--------------------------------------------------------------------------
+    
+    async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle menu navigation"""
         query = update.callback_query
         await query.answer()
         
         try:
             data = query.data
+            prefix = "[TEST MODE] " if self.test_mode else ""
             
-            if data == 'view_wallet':
-                await self.cmd_wallet(update, context)
-            elif data == 'view_positions':
-                await self.cmd_positions(update, context)
-            elif data == 'open_position':
-                await self.show_open_position_form(query)
-            elif data.startswith('close_'):
-                position_id = int(data.split('_')[1])
-                context.args = [str(position_id)]
-                await self.cmd_close_position(update, context)
-            elif data == 'refresh_wallet':
-                await self.cmd_wallet(update, context)
-            elif data.startswith('refresh_'):
-                if data.startswith('refresh_info_'):
-                    token_address = data.split('_')[2]
-                    context.args = [token_address]
-                    await self.cmd_info(update, context)
-                elif data.startswith('refresh_price_'):
-                    token_address = data.split('_')[2]
-                    context.args = [token_address]
-                    await self.cmd_price(update, context)
-                else:
-                    status = data.split('_')[1]
-                    context.args = [status]
-                    await self.cmd_positions(update, context)
-            elif data == 'view_closed':
-                context.args = ['closed']
-                await self.cmd_positions(update, context)
-            elif data == 'view_open':
-                context.args = ['open']
-                await self.cmd_positions(update, context)
-            elif data.startswith('trade_'):
-                token_address = data.split('_')[1]
-                await self.show_trade_form(query, token_address)
-            elif data.startswith('info_'):
-                token_address = data.split('_')[1]
-                context.args = [token_address]
-                await self.cmd_info(update, context)
-            elif data == 'show_help':
-                await self.cmd_help(update, context)
-            elif data == 'show_settings':
-                await self.cmd_settings(update, context)
-            elif data == 'start_trading':
-                await self.show_open_position_form(query)
-            elif data == 'edit_preferences':
-                await self.show_preferences_form(query)
-            elif data == 'view_history':
-                context.args = ['closed']
-                await self.cmd_positions(update, context)
-            
-        except Exception as e:
-            logger.error(f"Error handling callback: {e}")
-            await query.message.reply_text("Error processing your request.")
+            # Main menu navigation
+            if data in CALLBACKS['main'].values():
+                if data == CALLBACKS['main']['trading']:
+                    await self.show_trading_menu(query)
+                elif data == CALLBACKS['main']['account']:
+                    await self.show_account_menu(query)
+                elif data == CALLBACKS['main']['commands']:
+                    await self.show_commands_menu(query)
+                elif data == CALLBACKS['main']['help']:
+                    await self.show_help_menu(query)
+                return
 
-    async def show_open_position_form(self, query) -> None:
-        """Show form for opening a new position"""
-        try:
-            message = (
-                "*Open New Position*\n\n"
-                "Use the command format:\n"
-                "`/open <token_address> <size_sol> <type>`\n\n"
-                "Example:\n"
-                "`/open EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 10 long`\n\n"
-                "*Position Types:*\n"
-                "• long - Buy position\n"
-                "• short - Sell position"
-            )
+            # Back navigation - Handle this first
+            if data.startswith('back_'):
+                if data == 'back_main':
+                    await self.handle_back_to_main(query)
+                elif data == 'back_trading':
+                    await self.show_trading_menu(query)
+                elif data == 'back_account':
+                    await self.show_account_menu(query)
+                elif data == 'back_commands':
+                    await self.show_commands_menu(query)
+                elif data == 'back_help':
+                    await self.show_help_menu(query)
+                return
+
+            # Section handlers
+            if data.startswith('trade_'):
+                await self.handle_trading_action(query, data.split('_')[1])
+                return
             
-            keyboard = [
-                [
-                    InlineKeyboardButton("💰 View Wallet", callback_data='view_wallet'),
-                    InlineKeyboardButton("📊 View Positions", callback_data='view_positions')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            if data.startswith('account_'):
+                await self.handle_account_action(query, data.split('_')[1])
+                return
             
-            await query.message.reply_text(
-                message,
+            if data.startswith('command_'):
+                await self.handle_command_action(query, data.split('_')[1])
+                return
+            
+            if data.startswith('help_'):
+                await self.handle_help_action(query, data.split('_')[1])
+                return
+
+            # Unknown callback
+            logger.warning(f"Unknown callback data: {data}")
+            await query.message.edit_text(
+                f"{prefix}{MESSAGES['errors']['invalid_action']}\n\nUse /start to return to main menu.",
                 parse_mode='Markdown',
-                reply_markup=reply_markup
+                reply_markup=build_main_menu()
             )
+                
         except Exception as e:
-            logger.error(f"Error showing position form: {e}")
-            await query.message.reply_text("Error displaying form.")
+            logger.error(f"Error in callback: {e}")
+            await query.message.edit_text(
+                f"{prefix}{MESSAGES['errors']['general']}\n\nUse /start to return to main menu.",
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
 
-    async def show_trade_form(self, query, token_address: str) -> None:
-        """Show form for trading a specific token"""
+    async def handle_main_menu_navigation(self, query: CallbackQuery, action: str) -> None:
+        """
+        Handle navigation to main menu sections
+        
+        Actions:
+        - start_trading: Show trading menu
+        - view_account: Show account menu
+        - show_commands: Show commands menu
+        - show_help: Show help menu
+        """
         try:
-            token_info = await self.token_tracker.get_token_info(token_address)
-            price = await self.token_tracker.get_latest_price(token_address)
+            if action == CALLBACKS['main']['trading']:
+                await self.show_trading_menu(query)
+            elif action == CALLBACKS['main']['account']:
+                await self.show_account_menu(query)
+            elif action == CALLBACKS['main']['commands']:
+                await self.show_commands_menu(query)
+            elif action == CALLBACKS['main']['help']:
+                await self.show_help_menu(query)
+            else:
+                logger.warning(f"Unknown main menu action: {action}")
+                
+        except Exception as e:
+            logger.error(f"Error in main menu navigation: {e}")
+            await query.message.reply_text(MESSAGES['errors']['general'])
+
+    async def handle_token_selection(self, query: CallbackQuery, params: list) -> None:
+        """
+        Handle token selection for trading
+        
+        Format: token_<symbol>_<action>
+        Example: token_SOL_buy
+        """
+        try:
+            if len(params) < 2:
+                await query.message.reply_text(MESSAGES['errors']['invalid_action'])
+                return
+                
+            symbol, action = params
             
-            message = (
-                f"*Trade {token_info['symbol'] or 'Token'}*\n\n"
-                f"Current Price: {price:.4f} SOL\n\n"
-                f"To open a position:\n"
-                f"`/open {token_address} <size_sol> <type>`\n\n"
-                f"Example for 10 SOL long position:\n"
-                f"`/open {token_address} 10 long`"
+            if action not in ['buy', 'sell']:
+                await query.message.reply_text(MESSAGES['errors']['invalid_action'])
+                return
+                
+            # Here we'll add token selection logic
+            await query.message.edit_text(
+                f"Selected {symbol} for {action}. Amount entry coming soon...",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        BUTTONS['navigation']['back_trading'],
+                        callback_data=CALLBACKS['navigation']['back_trading']
+                    )
+                ]])
             )
             
+        except Exception as e:
+            logger.error(f"Error in token selection: {e}")
+            await query.message.reply_text(MESSAGES['errors']['general'])
+
+    #--------------------------------------------------------------------------
+    # Menu Display Methods - All menu rendering functions
+    #--------------------------------------------------------------------------
+    
+    async def show_trading_menu(self, query: CallbackQuery) -> None:
+        """Display trading interface menu"""
+        try:
             keyboard = [
                 [
-                    InlineKeyboardButton("Long", callback_data=f'preset_long_{token_address}'),
-                    InlineKeyboardButton("Short", callback_data=f'preset_short_{token_address}')
+                    InlineKeyboardButton("💵 Buy", 
+                                       callback_data='trade_buy'),
+                    InlineKeyboardButton("💸 Sell", 
+                                       callback_data='trade_sell')
                 ],
                 [
-                    InlineKeyboardButton("🔄 Refresh Price", callback_data=f'refresh_price_{token_address}'),
-                    InlineKeyboardButton("ℹ️ Token Info", callback_data=f'info_{token_address}')
+                    InlineKeyboardButton("📊 My Positions", 
+                                       callback_data='trade_positions'),
+                    InlineKeyboardButton("💰 My Wallet", 
+                                       callback_data='trade_wallet')
+                ],
+                [
+                    InlineKeyboardButton(BUTTONS['navigation']['back'], 
+                                       callback_data='back_main')
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await query.message.reply_text(
-                message,
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Trading Menu*\n\n"
+                "Select your trading action:\n"
+                "• Buy - Purchase tokens\n"
+                "• Sell - Sell tokens\n"
+                "• Positions - View your holdings\n"
+                "• Wallet - Check your balance",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
-        except Exception as e:
-            logger.error(f"Error showing trade form: {e}")
-            await query.message.reply_text("Error displaying trade form.")
-
-    async def show_preferences_form(self, query) -> None:
-        """Show user preferences form"""
-        try:
-            message = (
-                "*User Preferences*\n\n"
-                "Coming soon:\n"
-                "• Default position size\n"
-                "• Risk limits\n"
-                "• Notifications\n"
-                "• Display settings"
-            )
             
+        except Exception as e:
+            logger.error(f"Error showing trading menu: {e}")
+            await query.message.edit_text(
+                MESSAGES['errors']['general'],
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
+
+    async def show_account_menu(self, query: CallbackQuery) -> None:
+        """Display account management menu"""
+        try:
             keyboard = [
                 [
-                    InlineKeyboardButton("🔙 Back to Settings", callback_data='show_settings')
+                    InlineKeyboardButton("💰 Balance", 
+                                       callback_data='account_balance'),
+                    InlineKeyboardButton("📈 Statistics", 
+                                       callback_data='account_stats')
+                ],
+                [
+                    InlineKeyboardButton("⚙️ Settings", 
+                                       callback_data='account_settings'),
+                    InlineKeyboardButton("📜 History", 
+                                       callback_data='account_history')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", 
+                                       callback_data='back_main')
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            await query.message.reply_text(
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Account Menu*\n\n"
+                "Manage your account:\n"
+                "• View balance\n"
+                "• Check statistics\n"
+                "• Configure settings\n"
+                "• View history",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing account menu: {e}")
+            await query.message.edit_text(
+                MESSAGES['errors']['general'],
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
+
+    async def show_help_menu(self, query: CallbackQuery) -> None:
+        """Display help and support menu"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("📚 Getting Started", 
+                                       callback_data=CALLBACKS['help']['start']),
+                    InlineKeyboardButton("📈 Trading Guide", 
+                                       callback_data=CALLBACKS['help']['trading'])
+                ],
+                [
+                    InlineKeyboardButton("❓ FAQ", 
+                                       callback_data=CALLBACKS['help']['faq']),
+                    InlineKeyboardButton("🆘 Support", 
+                                       callback_data=CALLBACKS['help']['support'])
+                ],
+                [
+                    InlineKeyboardButton(BUTTONS['navigation']['back'], 
+                                       callback_data=CALLBACKS['navigation']['back_main'])
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}{MESSAGES['help']['menu']}",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing help menu: {e}")
+            await query.message.edit_text(
+                MESSAGES['errors']['general'],
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
+
+    # Test mode commands (admin only)
+    async def cmd_test_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle test mode for development"""
+        if not await self.is_admin(update.effective_user.id):
+            await update.message.reply_text("Admin access required.")
+            return
+            
+        self.test_mode = not self.test_mode
+        await update.message.reply_text(
+            f"Test mode {'enabled' if self.test_mode else 'disabled'}"
+        )
+
+    async def is_admin(self, user_id: int) -> bool:
+        """Check if user has admin privileges"""
+        # Implement admin check logic
+        return True  # Temporary for development
+
+    async def show_commands_menu(self, query: CallbackQuery) -> None:
+        """Show commands menu"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("📈 Trading Commands", 
+                                       callback_data='command_trading'),
+                    InlineKeyboardButton("💼 Account Management", 
+                                       callback_data='command_account')
+                ],
+                [
+                    InlineKeyboardButton("🔔 Alerts & Notifications", 
+                                       callback_data='command_alerts'),
+                    InlineKeyboardButton("ℹ️ Help Center", 
+                                       callback_data='command_help')
+                ],
+                [
+                    InlineKeyboardButton("�� Back", callback_data='back_main')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}{MESSAGES['commands']['menu']}",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing commands menu: {e}")
+            await query.message.edit_text(
+                MESSAGES['errors']['general'],
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
+
+    #--------------------------------------------------------------------------
+    # Action Handlers - Process user actions and interactions
+    #--------------------------------------------------------------------------
+    
+    async def handle_trading_action(self, query: CallbackQuery, action: str) -> None:
+        """Handle trading menu actions"""
+        try:
+            if action == 'buy':
+                await self.show_buy_menu(query)
+            elif action == 'sell':
+                await self.show_sell_menu(query)
+            elif action == 'positions':
+                await self.show_positions(query)
+            elif action == 'wallet':
+                await self.show_wallet(query)
+            else:
+                await query.message.edit_text(
+                    MESSAGES['errors']['not_implemented'],
+                    parse_mode='Markdown',
+                    reply_markup=build_back_button(CALLBACKS['navigation']['back_trading'])
+                )
+        except Exception as e:
+            logger.error(f"Error in trading action: {e}")
+            await self.show_trading_menu(query)
+
+    async def handle_account_action(self, query: CallbackQuery, action: str) -> None:
+        """
+        Process account-related actions
+        
+        Actions:
+        - balance: Show wallet balance
+        - stats: Show trading statistics
+        - settings: Show account settings
+        - history: Show transaction history
+        """
+        try:
+            if action == 'balance':
+                # In the future, get real balance from trading engine
+                test_data = {
+                    'available': '100.00',
+                    'locked': '0.00',
+                    'total': '10,000.00'
+                }
+                message = MESSAGES['account']['balance'].format(**test_data)
+            elif action == 'stats':
+                test_data = {
+                    'total_trades': 0,
+                    'profitable': 0,
+                    'unprofitable': 0,
+                    'roi': '0.00'
+                }
+                message = MESSAGES['account']['stats'].format(**test_data)
+            elif action == 'settings':
+                message = MESSAGES['errors']['not_implemented']
+            else:
+                message = MESSAGES['errors']['invalid_action']
+
+            await query.message.edit_text(
                 message,
+                parse_mode='Markdown',
+                reply_markup=build_back_button(CALLBACKS['navigation']['back_account'])
+            )
+        except Exception as e:
+            logger.error(f"Error in account action: {e}")
+            await query.message.reply_text(MESSAGES['errors']['general'])
+
+    async def handle_help_action(self, query: CallbackQuery, action: str) -> None:
+        """Handle help-related actions"""
+        try:
+            if action == 'start':
+                message = (
+                    "*Getting Started Guide*\n\n"
+                    "1. Connect your wallet\n"
+                    "2. Fund your account\n"
+                    "3. Start trading\n\n"
+                    "Need help? Contact support."
+                )
+            elif action == 'trading':
+                message = (
+                    "*Trading Guide*\n\n"
+                    "• How to buy tokens\n"
+                    "• How to sell tokens\n"
+                    "• Managing positions\n"
+                    "• Understanding fees"
+                )
+            elif action == 'faq':
+                message = (
+                    "*Frequently Asked Questions*\n\n"
+                    "• What tokens can I trade?\n"
+                    "• How are fees calculated?\n"
+                    "• Is my wallet secure?\n"
+                    "• How to contact support?"
+                )
+            elif action == 'support':
+                message = (
+                    "*Support*\n\n"
+                    "Need help? Contact us:\n"
+                    "• Email: support@kitraderbot.com\n"
+                    "• Telegram: @KiTraderSupport"
+                )
+            else:
+                message = "Invalid help topic"
+
+            await query.message.edit_text(
+                message,
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Back", callback_data='show_help')
+                ]])
+            )
+        except Exception as e:
+            logger.error(f"Error in help action: {e}")
+            await query.message.reply_text("Error displaying help information")
+
+    async def handle_command_menu_navigation(self, query: CallbackQuery, action: str) -> None:
+        """Handle navigation from commands menu"""
+        try:
+            if action == CALLBACKS['commands']['trading']:
+                await self.show_trading_commands(query)
+            elif action == CALLBACKS['commands']['account']:
+                await self.show_account_commands(query)
+            elif action == CALLBACKS['commands']['alerts']:
+                await self.show_alert_commands(query)
+            elif action == CALLBACKS['commands']['help']:
+                await self.show_help_menu(query)
+            else:
+                # Return to commands menu instead of main menu
+                await self.show_commands_menu(query)
+                
+        except Exception as e:
+            logger.error(f"Error in command menu navigation: {e}")
+            await self.show_commands_menu(query)  # Return to commands menu on error
+
+    async def show_trading_commands(self, query: CallbackQuery) -> None:
+        """Show trading commands submenu"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("💵 Buy/Sell", 
+                                       callback_data='command_trade_buysell'),
+                    InlineKeyboardButton("📊 Positions", 
+                                       callback_data='command_trade_positions')
+                ],
+                [
+                    InlineKeyboardButton("💰 Wallet", 
+                                       callback_data='command_trade_wallet'),
+                    InlineKeyboardButton("📈 Markets", 
+                                       callback_data='command_trade_markets')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Trading Commands*\n\n"
+                "Available commands:\n"
+                "• /buy <token> <amount> - Buy tokens\n"
+                "• /sell <token> <amount> - Sell tokens\n"
+                "• /price <token> - Get token price\n"
+                "• /positions - View open positions",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing trading commands: {e}")
+            await self.show_commands_menu(query)
+
+    async def show_alert_commands(self, query: CallbackQuery) -> None:
+        """Show alerts and notifications submenu"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("⚡ Price Alerts", 
+                                       callback_data=CALLBACKS['commands']['price_alerts']),
+                    InlineKeyboardButton("📱 Notifications", 
+                                       callback_data=CALLBACKS['commands']['notifications'])
+                ],
+                [
+                    InlineKeyboardButton("📊 Active Alerts", 
+                                       callback_data=CALLBACKS['commands']['active_alerts']),
+                    InlineKeyboardButton("📜 Alert History", 
+                                       callback_data=CALLBACKS['commands']['alert_history'])
+                ],
+                [
+                    InlineKeyboardButton(BUTTONS['navigation']['back'], 
+                                       callback_data=CALLBACKS['navigation']['back_commands'])
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Alert Commands*\n\n"
+                "• /alert <token> <price> - Set price alert\n"
+                "• /alerts - View active alerts\n"
+                "• /notify - Configure notifications\n"
+                "• /history - View alert history",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing alert commands: {e}")
+            await self.show_commands_menu(query)
+
+    async def handle_command_action(self, query: CallbackQuery, action: str) -> None:
+        """Handle command menu actions"""
+        try:
+            if action.startswith('trade_'):
+                sub_action = action.split('_')[1]
+                if sub_action == 'buysell':
+                    await self.show_buy_menu(query)
+                elif sub_action == 'positions':
+                    await self.show_positions(query)
+                elif sub_action == 'wallet':
+                    await self.show_wallet(query)
+                elif sub_action == 'markets':
+                    await query.message.edit_text(
+                        "*Market Overview*\n\nMarket data coming soon...",
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                        ]])
+                    )
+            elif action.startswith('account_'):
+                sub_action = action.split('_')[1]
+                if sub_action == 'balance':
+                    await query.message.edit_text(
+                        "*Balance Commands*\n\n"
+                        "• /balance - Show current balance\n"
+                        "• /deposit - Get deposit address\n"
+                        "• /withdraw - Withdraw funds",
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                        ]])
+                    )
+                elif sub_action == 'stats':
+                    await query.message.edit_text(
+                        "*Statistics Commands*\n\n"
+                        "• /stats - View trading stats\n"
+                        "• /pnl - Show profit/loss\n"
+                        "• /performance - Trading performance",
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                        ]])
+                    )
+                elif sub_action == 'settings':
+                    await query.message.edit_text(
+                        "*Settings Commands*\n\n"
+                        "• /settings - Account settings\n"
+                        "• /notifications - Alert settings\n"
+                        "• /security - Security settings",
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                        ]])
+                    )
+                elif sub_action == 'history':
+                    await query.message.edit_text(
+                        "*History Commands*\n\n"
+                        "• /history - Transaction history\n"
+                        "• /trades - Trading history\n"
+                        "• /transfers - Transfer history",
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                        ]])
+                    )
+            elif action == 'alerts':
+                await self.show_alert_commands(query)
+            elif action == 'help':
+                await self.show_help_menu(query)
+            else:
+                await query.message.edit_text(
+                    MESSAGES['errors']['not_implemented'],
+                    parse_mode='Markdown',
+                    reply_markup=build_back_button('back_commands')
+                )
+        except Exception as e:
+            logger.error(f"Error in command action: {e}")
+            await self.show_commands_menu(query)
+
+    async def handle_back_navigation(self, query: CallbackQuery, data: str) -> None:
+        """Handle back button navigation"""
+        try:
+            if data == 'back_main':
+                await self.cmd_start(query, query.message)
+            elif data == 'back_trading':
+                await self.show_trading_menu(query)
+            elif data == 'back_account':
+                await self.show_account_menu(query)
+            elif data == 'back_commands':
+                await self.show_commands_menu(query)
+            elif data == 'back_help':
+                await self.show_help_menu(query)
+            else:
+                logger.warning(f"Unknown back navigation: {data}")
+                await self.cmd_start(query, query.message)
+        except Exception as e:
+            logger.error(f"Error in back navigation: {e}")
+            await query.message.edit_text(
+                MESSAGES['errors']['general'],
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
+
+    async def show_buy_menu(self, query: CallbackQuery) -> None:
+        """Show token selection for buying"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("SOL", callback_data='token_SOL_buy'),
+                    InlineKeyboardButton("USDC", callback_data='token_USDC_buy')
+                ],
+                [
+                    InlineKeyboardButton("Search Token", callback_data='token_search_buy'),
+                    InlineKeyboardButton("Recent", callback_data='token_recent_buy')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data='back_trading')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Select Token to Buy*\n\n"
+                "Choose from popular tokens or search:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
         except Exception as e:
-            logger.error(f"Error showing preferences form: {e}")
-            await query.message.reply_text("Error displaying preferences.")
+            logger.error(f"Error showing buy menu: {e}")
+            await self.show_trading_menu(query)
+
+    async def show_sell_menu(self, query: CallbackQuery) -> None:
+        """Show token selection for selling"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("SOL", callback_data='token_SOL_sell'),
+                    InlineKeyboardButton("USDC", callback_data='token_USDC_sell')
+                ],
+                [
+                    InlineKeyboardButton("Search Token", callback_data='token_search_sell'),
+                    InlineKeyboardButton("Recent", callback_data='token_recent_sell')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data='back_trading')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Select Token to Sell*\n\n"
+                "Choose from your holdings:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error showing sell menu: {e}")
+            await self.show_trading_menu(query)
+
+    async def show_positions(self, query: CallbackQuery) -> None:
+        """Show user's trading positions"""
+        try:
+            # This will be replaced with actual position data from trading engine
+            keyboard = [
+                [
+                    InlineKeyboardButton("Open Positions", callback_data='trade_open_positions'),
+                    InlineKeyboardButton("Closed Positions", callback_data='trade_closed_positions')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data='back_trading')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Your Trading Positions*\n\n"
+                "No open positions\n\n"
+                "Select an option to view more details:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error showing positions: {e}")
+            await self.show_trading_menu(query)
+
+    async def show_wallet(self, query: CallbackQuery) -> None:
+        """Show wallet balance and options"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("Deposit", callback_data='trade_deposit'),
+                    InlineKeyboardButton("Withdraw", callback_data='trade_withdraw')
+                ],
+                [
+                    InlineKeyboardButton("Transaction History", callback_data='trade_history')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data='back_trading')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Wallet Balance*\n\n"
+                "💰 Available: 100.00 SOL\n"
+                "🔒 Locked: 0.00 SOL\n"
+                "📈 Total Value: $10,000.00\n\n"
+                "Select an option:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error showing wallet: {e}")
+            await self.show_trading_menu(query)
+
+    async def handle_back_to_main(self, query: CallbackQuery) -> None:
+        """Special handler for returning to main menu"""
+        try:
+            keyboard = build_main_menu()
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}{MESSAGES['welcome']['title']}\n\n{MESSAGES['welcome']['description']}",
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.error(f"Error returning to main menu: {e}")
+            await query.message.edit_text(
+                MESSAGES['errors']['general'],
+                parse_mode='Markdown',
+                reply_markup=build_main_menu()
+            )
+
+    async def show_account_commands(self, query: CallbackQuery) -> None:
+        """Show account management commands"""
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton("💰 Balance Commands", 
+                                       callback_data='command_account_balance'),
+                    InlineKeyboardButton("📊 Stats Commands", 
+                                       callback_data='command_account_stats')
+                ],
+                [
+                    InlineKeyboardButton("⚙️ Settings Commands", 
+                                       callback_data='command_account_settings'),
+                    InlineKeyboardButton("📜 History Commands", 
+                                       callback_data='command_account_history')
+                ],
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data='back_commands')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            prefix = "[TEST MODE] " if self.test_mode else ""
+            await query.message.edit_text(
+                f"{prefix}*Account Management Commands*\n\n"
+                "Available commands:\n"
+                "• /balance - Check your wallet balance\n"
+                "• /stats - View your trading statistics\n"
+                "• /settings - Configure account settings\n"
+                "• /history - View transaction history",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Error showing account commands: {e}")
+            await self.show_commands_menu(query)
+
